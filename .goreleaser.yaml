@@ -1,0 +1,41 @@
+version: 2
+
+project_name: kagi-cli
+
+builds:
+  - main: .
+    binary: kagi
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: linux
+        goarch: arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+brews:
+  - repository:
+      owner: senseylabs
+      name: homebrew-tap
+      token: "{{ .Env.GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/senseylabs/kagi-cli"
+    description: "Kagi CLI — secrets management for Sensey"
+    license: "MIT"
+    install: |
+      bin.install "kagi"
+    test: |
+      system "#{bin}/kagi", "--version"
+
+changelog:
+  sort: asc
