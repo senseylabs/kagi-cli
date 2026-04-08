@@ -49,17 +49,17 @@ var envDeleteCmd = &cobra.Command{
 }
 
 func init() {
-	envListCmd.Flags().StringVar(&envListProject, "project", "", "Project name (required)")
+	envListCmd.Flags().StringVarP(&envListProject, "project", "p", "", "Project name (required)")
 	_ = envListCmd.MarkFlagRequired("project")
 
-	envCreateCmd.Flags().StringVar(&envCreateProject, "project", "", "Project name (required)")
+	envCreateCmd.Flags().StringVarP(&envCreateProject, "project", "p", "", "Project name (required)")
 	envCreateCmd.Flags().StringVar(&envCreateName, "name", "", "Environment name (required)")
 	envCreateCmd.Flags().StringVar(&envCreateSlug, "slug", "", "Environment slug (required)")
 	_ = envCreateCmd.MarkFlagRequired("project")
 	_ = envCreateCmd.MarkFlagRequired("name")
 	_ = envCreateCmd.MarkFlagRequired("slug")
 
-	envDeleteCmd.Flags().StringVar(&envDeleteProject, "project", "", "Project name (required)")
+	envDeleteCmd.Flags().StringVarP(&envDeleteProject, "project", "p", "", "Project name (required)")
 	envDeleteCmd.Flags().StringVar(&envDeleteSlug, "slug", "", "Environment slug (required)")
 	envDeleteCmd.Flags().BoolVarP(&envDeleteYes, "yes", "y", false, "Skip confirmation prompt")
 	_ = envDeleteCmd.MarkFlagRequired("project")

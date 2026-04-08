@@ -26,9 +26,9 @@ var setupCmd = &cobra.Command{
 }
 
 func init() {
-	setupCmd.Flags().StringVar(&setupProject, "project", "", "Project name (skip interactive selection)")
-	setupCmd.Flags().StringVar(&setupApp, "app", "", "App name (skip interactive selection)")
-	setupCmd.Flags().StringVar(&setupEnv, "env", "", "Environment slug (skip interactive selection)")
+	setupCmd.Flags().StringVarP(&setupProject, "project", "p", "", "Project name (skip interactive selection)")
+	setupCmd.Flags().StringVarP(&setupApp, "app", "a", "", "App name (skip interactive selection)")
+	setupCmd.Flags().StringVarP(&setupEnv, "env", "e", "", "Environment slug (skip interactive selection)")
 	setupCmd.Flags().BoolVarP(&setupForce, "force", "f", false, "Overwrite existing kagi.yaml")
 	rootCmd.AddCommand(setupCmd)
 }

@@ -49,16 +49,16 @@ var appDeleteCmd = &cobra.Command{
 }
 
 func init() {
-	appListCmd.Flags().StringVar(&appListProject, "project", "", "Project name (required)")
+	appListCmd.Flags().StringVarP(&appListProject, "project", "p", "", "Project name (required)")
 	_ = appListCmd.MarkFlagRequired("project")
 
-	appCreateCmd.Flags().StringVar(&appCreateProject, "project", "", "Project name (required)")
+	appCreateCmd.Flags().StringVarP(&appCreateProject, "project", "p", "", "Project name (required)")
 	appCreateCmd.Flags().StringVar(&appCreateName, "name", "", "App name (required)")
 	appCreateCmd.Flags().StringVar(&appCreateDesc, "description", "", "App description")
 	_ = appCreateCmd.MarkFlagRequired("project")
 	_ = appCreateCmd.MarkFlagRequired("name")
 
-	appDeleteCmd.Flags().StringVar(&appDeleteProject, "project", "", "Project name (required)")
+	appDeleteCmd.Flags().StringVarP(&appDeleteProject, "project", "p", "", "Project name (required)")
 	appDeleteCmd.Flags().StringVar(&appDeleteName, "name", "", "App name (required)")
 	appDeleteCmd.Flags().BoolVarP(&appDeleteYes, "yes", "y", false, "Skip confirmation prompt")
 	_ = appDeleteCmd.MarkFlagRequired("project")

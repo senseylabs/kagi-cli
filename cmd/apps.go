@@ -19,7 +19,7 @@ var appsCmd = &cobra.Command{
 }
 
 func init() {
-	appsCmd.Flags().StringVar(&appsProject, "project", "", "Project name (required)")
+	appsCmd.Flags().StringVarP(&appsProject, "project", "p", "", "Project name (required)")
 	_ = appsCmd.MarkFlagRequired("project")
 	rootCmd.AddCommand(appsCmd)
 }

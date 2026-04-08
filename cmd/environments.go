@@ -19,7 +19,7 @@ var environmentsCmd = &cobra.Command{
 }
 
 func init() {
-	environmentsCmd.Flags().StringVar(&envProject, "project", "", "Project name (required)")
+	environmentsCmd.Flags().StringVarP(&envProject, "project", "p", "", "Project name (required)")
 	_ = environmentsCmd.MarkFlagRequired("project")
 	rootCmd.AddCommand(environmentsCmd)
 }

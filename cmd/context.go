@@ -123,7 +123,7 @@ func resolveProjectAppEnv(cmd *cobra.Command, vc *client.KagiClient) (*resolvedC
 
 // addProjectAppEnvFlags adds --project, --app, and --env flags to a command.
 func addProjectAppEnvFlags(cmd *cobra.Command) {
-	cmd.Flags().String("project", "", "Project name (overrides kagi.yaml)")
-	cmd.Flags().String("app", "", "App name (overrides kagi.yaml)")
-	cmd.Flags().String("env", "", "Environment slug (overrides kagi.yaml)")
+	cmd.Flags().StringP("project", "p", "", "Project name (overrides kagi.yaml)")
+	cmd.Flags().StringP("app", "a", "", "App name (overrides kagi.yaml)")
+	cmd.Flags().StringP("env", "e", "", "Environment slug (overrides kagi.yaml)")
 }
