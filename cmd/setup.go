@@ -74,28 +74,16 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		projectName = projects[choice-1].Name
 	}
 
-	// Step 2: Find project ID to list apps and environments
-	projects, err := vc.ListProjects()
+	// Step 2: Find project slug to list apps and environments
+	proj, err := findProject(vc, projectName)
 	if err != nil {
-		return fmt.Errorf("failed to list projects: %w", err)
-	}
-
-	var projectID string
-	for _, p := range projects {
-		if strings.EqualFold(p.Name, projectName) {
-			projectID = p.ID
-			projectName = p.Name // use exact casing from API
-			break
-		}
-	}
-	if projectID == "" {
-		return fmt.Errorf("project %q not found", projectName)
+		return err
 	}
 
 	// Step 3: Resolve app
 	appName := setupApp
 	if appName == "" {
-		apps, err := vc.ListApps(projectID)
+		apps, err := vc.ListApps(proj.Slug)
 		if err != nil {
 			return fmt.Errorf("failed to list apps: %w", err)
 		}
@@ -132,7 +120,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	// Step 4: Resolve environment
 	envSlug := setupEnv
 	if envSlug == "" {
-		envs, err := vc.ListEnvironments(projectID)
+		envs, err := vc.ListEnvironments(proj.Slug)
 		if err != nil {
 			return fmt.Errorf("failed to list environments: %w", err)
 		}

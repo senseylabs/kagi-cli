@@ -124,13 +124,13 @@ func (c *KagiClient) ListProjects() ([]Project, error) {
 }
 
 // ListApps returns all apps for a project.
-func (c *KagiClient) ListApps(projectID string) ([]App, error) {
-	return c.sdkClient.ListApps(context.Background(), projectID)
+func (c *KagiClient) ListApps(projectSlug string) ([]App, error) {
+	return c.sdkClient.ListApps(context.Background(), projectSlug)
 }
 
 // ListEnvironments returns all environments for a project.
-func (c *KagiClient) ListEnvironments(projectID string) ([]Environment, error) {
-	return c.sdkClient.ListEnvironments(context.Background(), projectID)
+func (c *KagiClient) ListEnvironments(projectSlug string) ([]Environment, error) {
+	return c.sdkClient.ListEnvironments(context.Background(), projectSlug)
 }
 
 // FetchSecrets returns decrypted secrets as key-value pairs for an app's environment.
@@ -302,13 +302,13 @@ func (c *KagiClient) DeleteProject(projectID string) error {
 }
 
 // CreateEnvironment creates a new environment within a project.
-func (c *KagiClient) CreateEnvironment(projectID, name, slug string) (*Environment, error) {
+func (c *KagiClient) CreateEnvironment(projectSlug, name, slug string) (*Environment, error) {
 	payload := map[string]string{
 		"name": name,
 		"slug": slug,
 	}
 
-	body, err := c.doRequestWithBody("POST", fmt.Sprintf("/kagi/projects/%s/environments", projectID), payload)
+	body, err := c.doRequestWithBody("POST", fmt.Sprintf("/kagi/projects/%s/environments", projectSlug), payload)
 	if err != nil {
 		return nil, err
 	}
@@ -322,19 +322,19 @@ func (c *KagiClient) CreateEnvironment(projectID, name, slug string) (*Environme
 }
 
 // DeleteEnvironment deletes an environment by ID within a project.
-func (c *KagiClient) DeleteEnvironment(projectID, envID string) error {
-	_, err := c.doRequest("DELETE", fmt.Sprintf("/kagi/projects/%s/environments/%s", projectID, envID))
+func (c *KagiClient) DeleteEnvironment(projectSlug, envID string) error {
+	_, err := c.doRequest("DELETE", fmt.Sprintf("/kagi/projects/%s/environments/%s", projectSlug, envID))
 	return err
 }
 
 // CreateApp creates a new app within a project.
-func (c *KagiClient) CreateApp(projectID, name, description string) (*App, error) {
+func (c *KagiClient) CreateApp(projectSlug, name, description string) (*App, error) {
 	payload := map[string]string{
 		"name":        name,
 		"description": description,
 	}
 
-	body, err := c.doRequestWithBody("POST", fmt.Sprintf("/kagi/projects/%s/apps", projectID), payload)
+	body, err := c.doRequestWithBody("POST", fmt.Sprintf("/kagi/projects/%s/apps", projectSlug), payload)
 	if err != nil {
 		return nil, err
 	}
@@ -348,8 +348,8 @@ func (c *KagiClient) CreateApp(projectID, name, description string) (*App, error
 }
 
 // DeleteApp deletes an app by ID within a project.
-func (c *KagiClient) DeleteApp(projectID, appID string) error {
-	_, err := c.doRequest("DELETE", fmt.Sprintf("/kagi/projects/%s/apps/%s", projectID, appID))
+func (c *KagiClient) DeleteApp(projectSlug, appID string) error {
+	_, err := c.doRequest("DELETE", fmt.Sprintf("/kagi/projects/%s/apps/%s", projectSlug, appID))
 	return err
 }
 

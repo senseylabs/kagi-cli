@@ -75,8 +75,8 @@ func runProjectCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tNAME\tDESCRIPTION")
-	fmt.Fprintf(w, "%s\t%s\t%s\n", project.ID, project.Name, project.Description)
+	fmt.Fprintln(w, "ID\tNAME\tSLUG\tDESCRIPTION")
+	fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", project.ID, project.Name, project.Slug, project.Description)
 	_ = w.Flush()
 
 	fmt.Printf("Created project %q.\n", project.Name)
@@ -94,20 +94,9 @@ func runProjectDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	// Find project by name
-	projects, err := vc.ListProjects()
+	proj, err := findProject(vc, projectDeleteName)
 	if err != nil {
-		return fmt.Errorf("failed to list projects: %w", err)
-	}
-
-	var projectID string
-	for _, p := range projects {
-		if strings.EqualFold(p.Name, projectDeleteName) {
-			projectID = p.ID
-			break
-		}
-	}
-	if projectID == "" {
-		return fmt.Errorf("project %q not found", projectDeleteName)
+		return err
 	}
 
 	// Confirm deletion
@@ -125,7 +114,7 @@ func runProjectDelete(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if err := vc.DeleteProject(projectID); err != nil {
+	if err := vc.DeleteProject(proj.ID); err != nil {
 		return fmt.Errorf("failed to delete project: %w", err)
 	}
 

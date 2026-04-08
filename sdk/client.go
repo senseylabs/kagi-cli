@@ -40,18 +40,18 @@ func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
 }
 
 // ListApps returns all apps within the specified project.
-func (c *Client) ListApps(ctx context.Context, projectID string) ([]App, error) {
+func (c *Client) ListApps(ctx context.Context, projectSlug string) ([]App, error) {
 	var resp APIResponse[[]App]
-	if err := c.doGet(ctx, fmt.Sprintf("/kagi/projects/%s/apps", projectID), &resp); err != nil {
+	if err := c.doGet(ctx, fmt.Sprintf("/kagi/projects/%s/apps", projectSlug), &resp); err != nil {
 		return nil, err
 	}
 	return resp.Data, nil
 }
 
 // ListEnvironments returns all environments within the specified project.
-func (c *Client) ListEnvironments(ctx context.Context, projectID string) ([]Environment, error) {
+func (c *Client) ListEnvironments(ctx context.Context, projectSlug string) ([]Environment, error) {
 	var resp APIResponse[[]Environment]
-	if err := c.doGet(ctx, fmt.Sprintf("/kagi/projects/%s/environments", projectID), &resp); err != nil {
+	if err := c.doGet(ctx, fmt.Sprintf("/kagi/projects/%s/environments", projectSlug), &resp); err != nil {
 		return nil, err
 	}
 	return resp.Data, nil

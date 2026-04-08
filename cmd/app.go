@@ -80,19 +80,19 @@ func runAppCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	projectID, err := findProjectID(vc, appCreateProject)
+	proj, err := findProject(vc, appCreateProject)
 	if err != nil {
 		return err
 	}
 
-	app, err := vc.CreateApp(projectID, appCreateName, appCreateDesc)
+	app, err := vc.CreateApp(proj.Slug, appCreateName, appCreateDesc)
 	if err != nil {
 		return fmt.Errorf("failed to create app: %w", err)
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tNAME\tDESCRIPTION")
-	fmt.Fprintf(w, "%s\t%s\t%s\n", app.ID, app.Name, app.Description)
+	fmt.Fprintln(w, "ID\tNAME\tSLUG\tDESCRIPTION")
+	fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", app.ID, app.Name, app.Slug, app.Description)
 	_ = w.Flush()
 
 	fmt.Printf("Created app %q.\n", app.Name)
@@ -109,13 +109,13 @@ func runAppDelete(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	projectID, err := findProjectID(vc, appDeleteProject)
+	proj, err := findProject(vc, appDeleteProject)
 	if err != nil {
 		return err
 	}
 
 	// Find app by name
-	apps, err := vc.ListApps(projectID)
+	apps, err := vc.ListApps(proj.Slug)
 	if err != nil {
 		return fmt.Errorf("failed to list apps: %w", err)
 	}
@@ -146,7 +146,7 @@ func runAppDelete(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if err := vc.DeleteApp(projectID, appID); err != nil {
+	if err := vc.DeleteApp(proj.Slug, appID); err != nil {
 		return fmt.Errorf("failed to delete app: %w", err)
 	}
 

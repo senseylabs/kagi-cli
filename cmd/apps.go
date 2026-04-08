@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"strings"
 	"text/tabwriter"
 
 	"github.com/senseylabs/kagi-cli/internal/client"
@@ -41,23 +40,12 @@ func runApps(cmd *cobra.Command, args []string) error {
 	}
 
 	// Find project by name
-	projects, err := vc.ListProjects()
+	proj, err := findProject(vc, projectName)
 	if err != nil {
-		return fmt.Errorf("failed to list projects: %w", err)
+		return err
 	}
 
-	var projectID string
-	for _, p := range projects {
-		if strings.EqualFold(p.Name, projectName) {
-			projectID = p.ID
-			break
-		}
-	}
-	if projectID == "" {
-		return fmt.Errorf("project %q not found", projectName)
-	}
-
-	apps, err := vc.ListApps(projectID)
+	apps, err := vc.ListApps(proj.Slug)
 	if err != nil {
 		return fmt.Errorf("failed to list apps: %w", err)
 	}
@@ -68,9 +56,9 @@ func runApps(cmd *cobra.Command, args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tNAME\tDESCRIPTION")
+	fmt.Fprintln(w, "ID\tNAME\tSLUG\tDESCRIPTION")
 	for _, a := range apps {
-		fmt.Fprintf(w, "%s\t%s\t%s\n", a.ID, a.Name, a.Description)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", a.ID, a.Name, a.Slug, a.Description)
 	}
 	return w.Flush()
 }

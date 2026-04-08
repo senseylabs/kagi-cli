@@ -9,12 +9,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// resolvedContext holds the resolved project, app, and environment IDs.
+// resolvedContext holds the resolved project, app, and environment identifiers.
 type resolvedContext struct {
 	ProjectName string
 	ProjectID   string
+	ProjectSlug string
 	AppName     string
 	AppID       string
+	AppSlug     string
 	EnvSlug     string
 	EnvID       string
 }
@@ -48,16 +50,17 @@ func resolveProjectAppEnv(cmd *cobra.Command, vc *client.KagiClient) (*resolvedC
 		return nil, fmt.Errorf("environment not specified. Use --env flag or run 'kagi setup' to create a kagi.yaml")
 	}
 
-	// Resolve project name → ID
+	// Resolve project name → slug + ID
 	projects, err := vc.ListProjects()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list projects: %w", err)
 	}
 
-	var projectID string
+	var projectID, projectSlug string
 	for _, p := range projects {
 		if strings.EqualFold(p.Name, projectName) {
 			projectID = p.ID
+			projectSlug = p.Slug
 			break
 		}
 	}
@@ -65,18 +68,19 @@ func resolveProjectAppEnv(cmd *cobra.Command, vc *client.KagiClient) (*resolvedC
 		return nil, fmt.Errorf("project %q not found", projectName)
 	}
 
-	// Resolve app name → ID
-	apps, err := vc.ListApps(projectID)
+	// Resolve app name → slug + ID
+	apps, err := vc.ListApps(projectSlug)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list apps: %w", err)
 	}
 
-	var appID string
+	var appID, appSlug string
 	if appName == "" {
 		// Auto-select if project has exactly one app
 		if len(apps) == 1 {
 			appName = apps[0].Name
 			appID = apps[0].ID
+			appSlug = apps[0].Slug
 		} else if len(apps) == 0 {
 			return nil, fmt.Errorf("no apps found in project %q. Create one with 'kagi app create'", projectName)
 		} else {
@@ -86,6 +90,7 @@ func resolveProjectAppEnv(cmd *cobra.Command, vc *client.KagiClient) (*resolvedC
 		for _, a := range apps {
 			if strings.EqualFold(a.Name, appName) {
 				appID = a.ID
+				appSlug = a.Slug
 				break
 			}
 		}
@@ -95,7 +100,7 @@ func resolveProjectAppEnv(cmd *cobra.Command, vc *client.KagiClient) (*resolvedC
 	}
 
 	// Resolve env slug → ID
-	envs, err := vc.ListEnvironments(projectID)
+	envs, err := vc.ListEnvironments(projectSlug)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list environments: %w", err)
 	}
@@ -114,8 +119,10 @@ func resolveProjectAppEnv(cmd *cobra.Command, vc *client.KagiClient) (*resolvedC
 	return &resolvedContext{
 		ProjectName: projectName,
 		ProjectID:   projectID,
+		ProjectSlug: projectSlug,
 		AppName:     appName,
 		AppID:       appID,
+		AppSlug:     appSlug,
 		EnvSlug:     envSlug,
 		EnvID:       envID,
 	}, nil

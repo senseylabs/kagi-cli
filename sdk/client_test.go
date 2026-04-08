@@ -40,8 +40,8 @@ func newTestServer(t *testing.T, wantPath string, data interface{}) *httptest.Se
 
 func TestListProjects(t *testing.T) {
 	projects := []Project{
-		{ID: "p1", Name: "Project One", Description: "First project"},
-		{ID: "p2", Name: "Project Two", Description: "Second project"},
+		{ID: "p1", Name: "Project One", Slug: "project-one", Description: "First project"},
+		{ID: "p2", Name: "Project Two", Slug: "project-two", Description: "Second project"},
 	}
 	ts := newTestServer(t, "/kagi/projects", projects)
 	defer ts.Close()

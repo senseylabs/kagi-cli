@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"strings"
 	"text/tabwriter"
 
 	"github.com/senseylabs/kagi-cli/internal/client"
@@ -35,23 +34,12 @@ func runEnvironments(cmd *cobra.Command, args []string) error {
 	}
 
 	// Find project by name
-	projects, err := vc.ListProjects()
+	proj, err := findProject(vc, envProject)
 	if err != nil {
-		return fmt.Errorf("failed to list projects: %w", err)
+		return err
 	}
 
-	var projectID string
-	for _, p := range projects {
-		if strings.EqualFold(p.Name, envProject) {
-			projectID = p.ID
-			break
-		}
-	}
-	if projectID == "" {
-		return fmt.Errorf("project %q not found", envProject)
-	}
-
-	envs, err := vc.ListEnvironments(projectID)
+	envs, err := vc.ListEnvironments(proj.Slug)
 	if err != nil {
 		return fmt.Errorf("failed to list environments: %w", err)
 	}

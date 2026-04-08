@@ -71,18 +71,24 @@ func init() {
 	rootCmd.AddCommand(envCmd)
 }
 
-func findProjectID(vc *client.KagiClient, projectName string) (string, error) {
+// projectRef holds the ID and slug for a resolved project.
+type projectRef struct {
+	ID   string
+	Slug string
+}
+
+func findProject(vc *client.KagiClient, projectName string) (*projectRef, error) {
 	projects, err := vc.ListProjects()
 	if err != nil {
-		return "", fmt.Errorf("failed to list projects: %w", err)
+		return nil, fmt.Errorf("failed to list projects: %w", err)
 	}
 
 	for _, p := range projects {
 		if strings.EqualFold(p.Name, projectName) {
-			return p.ID, nil
+			return &projectRef{ID: p.ID, Slug: p.Slug}, nil
 		}
 	}
-	return "", fmt.Errorf("project %q not found", projectName)
+	return nil, fmt.Errorf("project %q not found", projectName)
 }
 
 func runEnvList(cmd *cobra.Command, args []string) error {
@@ -95,12 +101,12 @@ func runEnvList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	projectID, err := findProjectID(vc, envListProject)
+	proj, err := findProject(vc, envListProject)
 	if err != nil {
 		return err
 	}
 
-	envs, err := vc.ListEnvironments(projectID)
+	envs, err := vc.ListEnvironments(proj.Slug)
 	if err != nil {
 		return fmt.Errorf("failed to list environments: %w", err)
 	}
@@ -128,12 +134,12 @@ func runEnvCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	projectID, err := findProjectID(vc, envCreateProject)
+	proj, err := findProject(vc, envCreateProject)
 	if err != nil {
 		return err
 	}
 
-	env, err := vc.CreateEnvironment(projectID, envCreateName, envCreateSlug)
+	env, err := vc.CreateEnvironment(proj.Slug, envCreateName, envCreateSlug)
 	if err != nil {
 		return fmt.Errorf("failed to create environment: %w", err)
 	}
@@ -157,13 +163,13 @@ func runEnvDelete(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	projectID, err := findProjectID(vc, envDeleteProject)
+	proj, err := findProject(vc, envDeleteProject)
 	if err != nil {
 		return err
 	}
 
 	// Find environment by slug
-	envs, err := vc.ListEnvironments(projectID)
+	envs, err := vc.ListEnvironments(proj.Slug)
 	if err != nil {
 		return fmt.Errorf("failed to list environments: %w", err)
 	}
@@ -194,7 +200,7 @@ func runEnvDelete(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if err := vc.DeleteEnvironment(projectID, envID); err != nil {
+	if err := vc.DeleteEnvironment(proj.Slug, envID); err != nil {
 		return fmt.Errorf("failed to delete environment: %w", err)
 	}
 
