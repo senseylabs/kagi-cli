@@ -58,7 +58,7 @@ func resolveProjectAppEnv(cmd *cobra.Command, vc *client.KagiClient) (*resolvedC
 
 	var projectID, projectSlug string
 	for _, p := range projects {
-		if strings.EqualFold(p.Name, projectName) {
+		if strings.EqualFold(p.Name, projectName) || strings.EqualFold(p.Slug, projectName) {
 			projectID = p.ID
 			projectSlug = p.Slug
 			break
@@ -88,7 +88,7 @@ func resolveProjectAppEnv(cmd *cobra.Command, vc *client.KagiClient) (*resolvedC
 		}
 	} else {
 		for _, a := range apps {
-			if strings.EqualFold(a.Name, appName) {
+			if strings.EqualFold(a.Name, appName) || strings.EqualFold(a.Slug, appName) {
 				appID = a.ID
 				appSlug = a.Slug
 				break
