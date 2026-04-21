@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,10 +11,16 @@ import (
 	"time"
 )
 
+// DefaultScope is the OAuth scope requested by the Kagi CLI.
+// offline_access asks Keycloak for a refresh token bound to the realm's
+// offline-session lifetime rather than the user's SSO session.
+const DefaultScope = "openid offline_access"
+
 // OIDCEndpoints holds the discovered OpenID Connect endpoints.
 type OIDCEndpoints struct {
 	DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint"`
 	TokenEndpoint               string `json:"token_endpoint"`
+	RevocationEndpoint          string `json:"revocation_endpoint"`
 }
 
 // DeviceAuthResponse represents the device authorization response.
@@ -177,14 +184,21 @@ func (d *DeviceFlow) PollForToken(tokenEndpoint, deviceCode string, interval tim
 }
 
 // RefreshToken uses a refresh token to obtain a new access token.
-func (d *DeviceFlow) RefreshToken(tokenEndpoint, refreshToken string) (*TokenResponse, error) {
+// The caller controls the timeout via ctx.
+func (d *DeviceFlow) RefreshToken(ctx context.Context, tokenEndpoint, refreshToken string) (*TokenResponse, error) {
 	data := url.Values{
 		"grant_type":    {"refresh_token"},
 		"client_id":     {d.clientID},
 		"refresh_token": {refreshToken},
 	}
 
-	resp, err := d.client.Post(tokenEndpoint, "application/x-www-form-urlencoded", strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create refresh request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := d.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("refresh token request failed: %w", err)
 	}
@@ -205,4 +219,34 @@ func (d *DeviceFlow) RefreshToken(tokenEndpoint, refreshToken string) (*TokenRes
 	}
 
 	return &tokenResp, nil
+}
+
+// RevokeToken asks the IdP to revoke the given refresh token per RFC 7009.
+// The caller controls the timeout via ctx; RFC 7009 allows the server to respond
+// with either HTTP 200 or 204 on success.
+func (d *DeviceFlow) RevokeToken(ctx context.Context, revocationEndpoint, refreshToken string) error {
+	data := url.Values{
+		"client_id":       {d.clientID},
+		"token":           {refreshToken},
+		"token_type_hint": {"refresh_token"},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, revocationEndpoint, strings.NewReader(data.Encode()))
+	if err != nil {
+		return fmt.Errorf("failed to create revocation request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("revocation request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent {
+		return nil
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	return fmt.Errorf("revocation failed with status %d: %s", resp.StatusCode, string(body))
 }

@@ -87,13 +87,15 @@ func NewKagiClient(baseURL, issuerURL string) (*KagiClient, error) {
 		if refreshIssuer == "" {
 			refreshIssuer = issuerURL
 		}
-		deviceFlow := auth.NewDeviceFlow(refreshIssuer, "kagi-cli", "openid")
+		deviceFlow := auth.NewDeviceFlow(refreshIssuer, "kagi-cli", auth.DefaultScope)
 		endpoints, err := deviceFlow.DiscoverEndpoints()
 		if err != nil {
 			return nil, fmt.Errorf("session expired. Run 'kagi login' to re-authenticate")
 		}
 
-		newToken, err := deviceFlow.RefreshToken(endpoints.TokenEndpoint, creds.RefreshToken)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		newToken, err := deviceFlow.RefreshToken(ctx, endpoints.TokenEndpoint, creds.RefreshToken)
+		cancel()
 		if err != nil {
 			return nil, fmt.Errorf("session expired. Run 'kagi login' to re-authenticate")
 		}

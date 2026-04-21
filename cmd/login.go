@@ -27,7 +27,7 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		fmt.Println("Using local development URLs")
 	}
 
-	deviceFlow := auth.NewDeviceFlow(cfgIssuer, "kagi-cli", "openid")
+	deviceFlow := auth.NewDeviceFlow(cfgIssuer, "kagi-cli", auth.DefaultScope)
 
 	// Step 1: Discover OIDC endpoints
 	fmt.Println("Discovering Keycloak endpoints...")
