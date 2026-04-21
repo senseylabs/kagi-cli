@@ -12,9 +12,9 @@ import (
 
 const (
 	prodAPIURL  = "https://kagi-api.sensey.io"
-	prodIssuer  = "https://keycloak.sensey.io/realms/sensey"
+	prodIssuer  = "https://keycloak.sensey.io/realms/kagi"
 	devAPIURL   = "http://localhost:8081"
-	devIssuer   = "http://localhost:8086/realms/sensey"
+	devIssuer   = "http://localhost:8085/realms/kagi"
 )
 
 var (
@@ -88,15 +88,23 @@ func initConfig() {
 	if cfgIssuer == "" {
 		if v := os.Getenv("KAGI_KEYCLOAK_ISSUER"); v != "" {
 			cfgIssuer = v
-		} else if cfg.Issuer != "" {
+		} else if cfg.Issuer != "" && !isStaleIssuer(cfg.Issuer) {
 			cfgIssuer = cfg.Issuer
-		} else if storedCreds.IssuerURL != "" {
+		} else if storedCreds.IssuerURL != "" && !isStaleIssuer(storedCreds.IssuerURL) {
 			cfgIssuer = storedCreds.IssuerURL
 		} else {
 			cfgIssuer = prodIssuer
 		}
 	}
 
+}
+
+// isStaleIssuer rejects issuer URLs from the pre-migration `sensey` realm so
+// users upgrading from older CLI versions don't have their cached (stale)
+// issuer win over the new `kagi` realm default. KAGI_KEYCLOAK_ISSUER env stays
+// authoritative and bypasses this filter.
+func isStaleIssuer(url string) bool {
+	return strings.Contains(url, "/realms/sensey")
 }
 
 func requireAuth() error {

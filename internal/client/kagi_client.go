@@ -21,6 +21,11 @@ type Project = kagi.Project
 type App = kagi.App
 type Environment = kagi.Environment
 type SecretFetchResponse = kagi.SecretFetchResponse
+type CertificateListItem = kagi.CertificateListItem
+type CertificateDetail = kagi.CertificateDetail
+type CertificateReveal = kagi.CertificateReveal
+type CertificateBinding = kagi.CertificateBinding
+type CertificateHistory = kagi.CertificateHistory
 
 // APIErrorResponse represents an error response from the API.
 type APIErrorResponse struct {
@@ -87,7 +92,7 @@ func NewKagiClient(baseURL, issuerURL string) (*KagiClient, error) {
 		if refreshIssuer == "" {
 			refreshIssuer = issuerURL
 		}
-		deviceFlow := auth.NewDeviceFlow(refreshIssuer, "kagi-cli", auth.DefaultScope)
+		deviceFlow := auth.NewDeviceFlow(refreshIssuer, "cli", auth.DefaultScope)
 		endpoints, err := deviceFlow.DiscoverEndpoints()
 		if err != nil {
 			return nil, fmt.Errorf("session expired. Run 'kagi login' to re-authenticate")
@@ -138,6 +143,31 @@ func (c *KagiClient) ListEnvironments(projectSlug string) ([]Environment, error)
 // FetchSecrets returns decrypted secrets as key-value pairs for an app's environment.
 func (c *KagiClient) FetchSecrets(appID, envID string) (map[string]string, error) {
 	return c.sdkClient.FetchSecrets(context.Background(), appID, envID)
+}
+
+// ListCertificates returns all certificates.
+func (c *KagiClient) ListCertificates() ([]CertificateListItem, error) {
+	return c.sdkClient.ListCertificates(context.Background())
+}
+
+// GetCertificateDetail returns detailed metadata for a certificate.
+func (c *KagiClient) GetCertificateDetail(certID string) (*CertificateDetail, error) {
+	return c.sdkClient.GetCertificateDetail(context.Background(), certID)
+}
+
+// RevealCertificate returns the decrypted certificate and private key.
+func (c *KagiClient) RevealCertificate(certID string) (*CertificateReveal, error) {
+	return c.sdkClient.RevealCertificate(context.Background(), certID)
+}
+
+// ListCertificateBindings returns all bindings for a certificate.
+func (c *KagiClient) ListCertificateBindings(certID string) ([]CertificateBinding, error) {
+	return c.sdkClient.ListCertificateBindings(context.Background(), certID)
+}
+
+// GetCertificateHistory returns audit history for a certificate.
+func (c *KagiClient) GetCertificateHistory(certID string) ([]CertificateHistory, error) {
+	return c.sdkClient.GetCertificateHistory(context.Background(), certID)
 }
 
 // ---------------------------------------------------------------------------
@@ -409,4 +439,82 @@ func (c *KagiClient) ListSecrets(appID, envID string) ([]SecretListItem, error) 
 	}
 
 	return resp.Data, nil
+}
+
+// ---------------------------------------------------------------------------
+// Certificate write operations
+// ---------------------------------------------------------------------------
+
+// CreateCertificate creates a new certificate.
+func (c *KagiClient) CreateCertificate(name, certContent, keyContent string) (*CertificateDetail, error) {
+	payload := map[string]string{
+		"name":               name,
+		"certificateContent": certContent,
+		"privateKeyContent":  keyContent,
+	}
+
+	body, err := c.doRequestWithBody("POST", "/kagi/certificates", payload)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp kagi.APIResponse[CertificateDetail]
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse create certificate response: %w", err)
+	}
+
+	return &resp.Data, nil
+}
+
+// UpdateCertificate updates an existing certificate's content.
+func (c *KagiClient) UpdateCertificate(certID, certContent, keyContent string) (*CertificateDetail, error) {
+	payload := map[string]string{
+		"certificateContent": certContent,
+		"privateKeyContent":  keyContent,
+	}
+
+	body, err := c.doRequestWithBody("PUT", fmt.Sprintf("/kagi/certificates/%s", certID), payload)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp kagi.APIResponse[CertificateDetail]
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse update certificate response: %w", err)
+	}
+
+	return &resp.Data, nil
+}
+
+// DeleteCertificate deletes a certificate by ID.
+func (c *KagiClient) DeleteCertificate(certID string) error {
+	_, err := c.doRequest("DELETE", fmt.Sprintf("/kagi/certificates/%s", certID))
+	return err
+}
+
+// CreateCertificateBinding binds a certificate to a project/app/environment.
+func (c *KagiClient) CreateCertificateBinding(certID, projectID, appID, envID string) (*CertificateBinding, error) {
+	payload := map[string]string{
+		"projectId":     projectID,
+		"appId":         appID,
+		"environmentId": envID,
+	}
+
+	body, err := c.doRequestWithBody("POST", fmt.Sprintf("/kagi/certificates/%s/bindings", certID), payload)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp kagi.APIResponse[CertificateBinding]
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse create certificate binding response: %w", err)
+	}
+
+	return &resp.Data, nil
+}
+
+// DeleteCertificateBinding deletes a certificate binding by ID.
+func (c *KagiClient) DeleteCertificateBinding(certID, bindingID string) error {
+	_, err := c.doRequest("DELETE", fmt.Sprintf("/kagi/certificates/%s/bindings/%s", certID, bindingID))
+	return err
 }

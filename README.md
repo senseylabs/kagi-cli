@@ -74,15 +74,15 @@ kagi environments --project my-app
 
 | Flag | Env var | Default |
 |------|---------|---------|
-| `--api-url` | `KAGI_API_URL` | `https://api.village.sensey.io` |
-| `--issuer` | `KAGI_KEYCLOAK_ISSUER` | `https://auth.sensey.io/realms/sensey` |
+| `--api-url` | `KAGI_API_URL` | `https://kagi-api.sensey.io` |
+| `--issuer` | `KAGI_KEYCLOAK_ISSUER` | `https://keycloak.sensey.io/realms/kagi` |
 
 ### Config file (`.kagi.yaml`)
 
 Place in the current directory or `~/.kagi/config.yaml`:
 
 ```yaml
-api-url: https://api.village.sensey.io
+api-url: https://kagi-api.sensey.io
 project: my-project
 environment: development
 ```

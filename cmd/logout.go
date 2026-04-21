@@ -34,7 +34,7 @@ func runLogout(cmd *cobra.Command, args []string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		deviceFlow := auth.NewDeviceFlow(creds.IssuerURL, "kagi-cli", auth.DefaultScope)
+		deviceFlow := auth.NewDeviceFlow(creds.IssuerURL, "cli", auth.DefaultScope)
 		endpoints, err := deviceFlow.DiscoverEndpoints()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: server-side token revocation failed: %v — your tokens remain valid on the server until their lifetime expires\n", err)
