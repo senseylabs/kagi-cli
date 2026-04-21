@@ -66,6 +66,51 @@ func (c *Client) FetchSecrets(ctx context.Context, appID, environmentID string) 
 	return resp.Data.Secrets, nil
 }
 
+// ListCertificates returns all certificates.
+func (c *Client) ListCertificates(ctx context.Context) ([]CertificateListItem, error) {
+	var resp APIResponse[[]CertificateListItem]
+	if err := c.doGet(ctx, "/kagi/certificates", &resp); err != nil {
+		return nil, err
+	}
+	return resp.Data, nil
+}
+
+// GetCertificateDetail returns detailed metadata for a certificate.
+func (c *Client) GetCertificateDetail(ctx context.Context, certID string) (*CertificateDetail, error) {
+	var resp APIResponse[CertificateDetail]
+	if err := c.doGet(ctx, fmt.Sprintf("/kagi/certificates/%s", certID), &resp); err != nil {
+		return nil, err
+	}
+	return &resp.Data, nil
+}
+
+// RevealCertificate returns the decrypted certificate and private key.
+func (c *Client) RevealCertificate(ctx context.Context, certID string) (*CertificateReveal, error) {
+	var resp APIResponse[CertificateReveal]
+	if err := c.doGet(ctx, fmt.Sprintf("/kagi/certificates/%s/reveal", certID), &resp); err != nil {
+		return nil, err
+	}
+	return &resp.Data, nil
+}
+
+// ListCertificateBindings returns all bindings for a certificate.
+func (c *Client) ListCertificateBindings(ctx context.Context, certID string) ([]CertificateBinding, error) {
+	var resp APIResponse[[]CertificateBinding]
+	if err := c.doGet(ctx, fmt.Sprintf("/kagi/certificates/%s/bindings", certID), &resp); err != nil {
+		return nil, err
+	}
+	return resp.Data, nil
+}
+
+// GetCertificateHistory returns audit history for a certificate.
+func (c *Client) GetCertificateHistory(ctx context.Context, certID string) ([]CertificateHistory, error) {
+	var resp APIResponse[[]CertificateHistory]
+	if err := c.doGet(ctx, fmt.Sprintf("/kagi/certificates/%s/history", certID), &resp); err != nil {
+		return nil, err
+	}
+	return resp.Data, nil
+}
+
 // doGet performs an authenticated GET request, reads the response body, and
 // unmarshals the JSON into result. It returns an error for non-2xx status codes.
 func (c *Client) doGet(ctx context.Context, path string, result any) error {
