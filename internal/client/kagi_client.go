@@ -24,7 +24,6 @@ type SecretFetchResponse = kagi.SecretFetchResponse
 type CertificateListItem = kagi.CertificateListItem
 type CertificateDetail = kagi.CertificateDetail
 type CertificateReveal = kagi.CertificateReveal
-type CertificateBinding = kagi.CertificateBinding
 type CertificateHistory = kagi.CertificateHistory
 
 // APIErrorResponse represents an error response from the API.
@@ -158,11 +157,6 @@ func (c *KagiClient) GetCertificateDetail(certID string) (*CertificateDetail, er
 // RevealCertificate returns the decrypted certificate and private key.
 func (c *KagiClient) RevealCertificate(certID string) (*CertificateReveal, error) {
 	return c.sdkClient.RevealCertificate(context.Background(), certID)
-}
-
-// ListCertificateBindings returns all bindings for a certificate.
-func (c *KagiClient) ListCertificateBindings(certID string) ([]CertificateBinding, error) {
-	return c.sdkClient.ListCertificateBindings(context.Background(), certID)
 }
 
 // GetCertificateHistory returns audit history for a certificate.
@@ -492,29 +486,3 @@ func (c *KagiClient) DeleteCertificate(certID string) error {
 	return err
 }
 
-// CreateCertificateBinding binds a certificate to a project/app/environment.
-func (c *KagiClient) CreateCertificateBinding(certID, projectID, appID, envID string) (*CertificateBinding, error) {
-	payload := map[string]string{
-		"projectId":     projectID,
-		"appId":         appID,
-		"environmentId": envID,
-	}
-
-	body, err := c.doRequestWithBody("POST", fmt.Sprintf("/kagi/certificates/%s/bindings", certID), payload)
-	if err != nil {
-		return nil, err
-	}
-
-	var resp kagi.APIResponse[CertificateBinding]
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("failed to parse create certificate binding response: %w", err)
-	}
-
-	return &resp.Data, nil
-}
-
-// DeleteCertificateBinding deletes a certificate binding by ID.
-func (c *KagiClient) DeleteCertificateBinding(certID, bindingID string) error {
-	_, err := c.doRequest("DELETE", fmt.Sprintf("/kagi/certificates/%s/bindings/%s", certID, bindingID))
-	return err
-}

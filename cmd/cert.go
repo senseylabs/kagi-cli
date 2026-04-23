@@ -147,10 +147,10 @@ func runCertList(cmd *cobra.Command, args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tSUBJECT\tDOMAINS\tEXPIRES\tBINDINGS\tSOURCE")
+	fmt.Fprintln(w, "NAME\tSUBJECT\tDOMAINS\tEXPIRES\tSOURCE")
 	for _, c := range certs {
 		domains := parseSANs(c.SANs)
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\n", c.Name, c.Subject, domains, c.NotAfter, c.BindingCount, c.Source)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", c.Name, c.Subject, domains, c.NotAfter, c.Source)
 	}
 	return w.Flush()
 }

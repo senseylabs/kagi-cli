@@ -93,15 +93,6 @@ func (c *Client) RevealCertificate(ctx context.Context, certID string) (*Certifi
 	return &resp.Data, nil
 }
 
-// ListCertificateBindings returns all bindings for a certificate.
-func (c *Client) ListCertificateBindings(ctx context.Context, certID string) ([]CertificateBinding, error) {
-	var resp APIResponse[[]CertificateBinding]
-	if err := c.doGet(ctx, fmt.Sprintf("/kagi/certificates/%s/bindings", certID), &resp); err != nil {
-		return nil, err
-	}
-	return resp.Data, nil
-}
-
 // GetCertificateHistory returns audit history for a certificate.
 func (c *Client) GetCertificateHistory(ctx context.Context, certID string) ([]CertificateHistory, error) {
 	var resp APIResponse[[]CertificateHistory]
