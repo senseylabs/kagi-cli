@@ -49,23 +49,54 @@ kagi run -- npm start
 ### Manage secrets
 
 ```bash
-# Set a secret
-kagi secret set --project my-app --env production --key DATABASE_URL --value "postgres://..."
+# Set one or more secrets (KEY=VALUE pairs)
+kagi secrets set DATABASE_URL=postgres://... --project my-project --app my-app --env production
 
-# Get a secret
-kagi secret get --project my-app --env production --key DATABASE_URL
+# Import secrets from an .env file
+kagi secrets set --from-file=.env --project my-project --app my-app --env production
+
+# Get a single secret (decrypted)
+kagi secrets get DATABASE_URL --project my-project --app my-app --env production
+
+# List all secrets (masked)
+kagi secrets list --project my-project --app my-app --env production
+
+# Delete a secret
+kagi secrets delete DATABASE_URL --project my-project --app my-app --env production
 ```
 
-### List projects
+### Browse the hierarchy
+
+`kagi secrets` is flag-driven:
 
 ```bash
-kagi projects
+# List all projects
+kagi secrets
+
+# List apps in a project
+kagi secrets -p my-project
+
+# List masked secrets for an (app, env) pair
+kagi secrets -p my-project -a my-app -e production
 ```
 
-### List environments
+Use `kagi secrets env list -p my-project` to list environments; bare `kagi secrets -p my-project` lists apps.
+
+### Manage projects, apps, environments
 
 ```bash
-kagi environments --project my-app
+# Projects
+kagi secrets project create --name my-project --description "..."
+kagi secrets project delete --name my-project
+
+# Apps (scoped to a project)
+kagi secrets app create -p my-project --name my-app --description "..."
+kagi secrets app delete -p my-project --name my-app
+
+# Environments (scoped to a project)
+kagi secrets env list   -p my-project
+kagi secrets env create -p my-project --name Production --slug production
+kagi secrets env delete -p my-project --slug production
 ```
 
 ## Configuration

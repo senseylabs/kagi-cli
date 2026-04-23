@@ -16,14 +16,6 @@ var appCmd = &cobra.Command{
 	Short: "Manage apps",
 }
 
-var appListProject string
-
-var appListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List all apps for a project",
-	RunE:  runApps, // reuse existing runApps function from apps.go
-}
-
 var (
 	appCreateProject string
 	appCreateName    string
@@ -49,9 +41,6 @@ var appDeleteCmd = &cobra.Command{
 }
 
 func init() {
-	appListCmd.Flags().StringVarP(&appListProject, "project", "p", "", "Project name (required)")
-	_ = appListCmd.MarkFlagRequired("project")
-
 	appCreateCmd.Flags().StringVarP(&appCreateProject, "project", "p", "", "Project name (required)")
 	appCreateCmd.Flags().StringVar(&appCreateName, "name", "", "App name (required)")
 	appCreateCmd.Flags().StringVar(&appCreateDesc, "description", "", "App description")
@@ -64,10 +53,9 @@ func init() {
 	_ = appDeleteCmd.MarkFlagRequired("project")
 	_ = appDeleteCmd.MarkFlagRequired("name")
 
-	appCmd.AddCommand(appListCmd)
 	appCmd.AddCommand(appCreateCmd)
 	appCmd.AddCommand(appDeleteCmd)
-	rootCmd.AddCommand(appCmd)
+	// Registration under `secrets` happens in cmd/secrets.go init().
 }
 
 func runAppCreate(cmd *cobra.Command, args []string) error {

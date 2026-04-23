@@ -16,12 +16,6 @@ var projectCmd = &cobra.Command{
 	Short: "Manage projects",
 }
 
-var projectListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List all projects",
-	RunE:  runProjects, // reuse existing runProjects function from projects.go
-}
-
 var (
 	projectCreateName string
 	projectCreateDesc string
@@ -53,10 +47,9 @@ func init() {
 	projectDeleteCmd.Flags().BoolVarP(&projectDeleteYes, "yes", "y", false, "Skip confirmation prompt")
 	_ = projectDeleteCmd.MarkFlagRequired("name")
 
-	projectCmd.AddCommand(projectListCmd)
 	projectCmd.AddCommand(projectCreateCmd)
 	projectCmd.AddCommand(projectDeleteCmd)
-	rootCmd.AddCommand(projectCmd)
+	// Registration under `secrets` happens in cmd/secrets.go init().
 }
 
 func runProjectCreate(cmd *cobra.Command, args []string) error {

@@ -14,9 +14,15 @@ import (
 
 var keyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
 
-var secretCmd = &cobra.Command{
-	Use:   "secret",
-	Short: "Manage secrets",
+var secretsCmd = &cobra.Command{
+	Use:   "secrets",
+	Short: "Manage projects, apps, environments, and secrets",
+	Long: "Flag-driven listing and mutations for the project/app/env/secrets hierarchy.\n" +
+		"  kagi secrets                                  list all projects\n" +
+		"  kagi secrets -p Village                       list apps in project\n" +
+		"  kagi secrets -p Village -a kaizen -e prod     list masked secrets",
+	Args: cobra.NoArgs,
+	RunE: runSecretsDispatch,
 }
 
 var secretSetFromFile string
@@ -59,11 +65,106 @@ func init() {
 
 	secretDeleteCmd.Flags().BoolVarP(&secretDeleteYes, "yes", "y", false, "Skip confirmation prompt")
 
-	secretCmd.AddCommand(secretSetCmd)
-	secretCmd.AddCommand(secretGetCmd)
-	secretCmd.AddCommand(secretDeleteCmd)
-	secretCmd.AddCommand(secretListCmd)
-	rootCmd.AddCommand(secretCmd)
+	// Dispatcher flags on `kagi secrets` itself. Regular Flags (not PersistentFlags)
+	// so they don't collide with the -p/-a/-e flags already declared on child
+	// commands (set/get/delete/list, and the management subtrees).
+	secretsCmd.Flags().StringP("project", "p", "", "Project name")
+	secretsCmd.Flags().StringP("app", "a", "", "App name")
+	secretsCmd.Flags().StringP("env", "e", "", "Environment slug")
+
+	// Management subtrees moved under `secrets`.
+	secretsCmd.AddCommand(projectCmd, appCmd, envCmd)
+
+	// Secret mutations + explicit list alias.
+	secretsCmd.AddCommand(secretSetCmd, secretGetCmd, secretDeleteCmd, secretListCmd)
+
+	rootCmd.AddCommand(secretsCmd)
+}
+
+// runSecretsDispatch routes bare `kagi secrets [-p ...] [-a ...] [-e ...]` invocations
+// to the appropriate listing based on which flags were explicitly passed.
+//
+// Important: use cmd.Flags().Changed(...) to detect flag presence rather than
+// comparing the string value to "" — that conflates "not passed" with "passed
+// empty" and would silently activate the kagi.yaml fallback inside
+// resolveProjectAppEnv, which is not what the user asked for here.
+func runSecretsDispatch(cmd *cobra.Command, args []string) error {
+	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	vc, err := client.NewKagiClient(cfgAPIURL, cfgIssuer)
+	if err != nil {
+		return err
+	}
+
+	hasP := cmd.Flags().Changed("project")
+	hasA := cmd.Flags().Changed("app")
+
+	projectName, _ := cmd.Flags().GetString("project")
+
+	switch {
+	case !hasP && !hasA:
+		return listAllProjects(vc)
+	case hasP && !hasA:
+		return listAppsInProject(vc, projectName)
+	case hasP && hasA:
+		// Reuse the existing secret-list handler — it calls resolveProjectAppEnv
+		// which enforces that -e is also set (no silent default for env).
+		return runSecretList(cmd, args)
+	default: // !hasP && hasA
+		return fmt.Errorf("-a/--app requires -p/--project")
+	}
+}
+
+// listAllProjects renders every project the user can see. Moved here from the
+// deleted cmd/projects.go so the bare `kagi secrets` invocation stays
+// self-contained.
+func listAllProjects(vc *client.KagiClient) error {
+	projects, err := vc.ListProjects()
+	if err != nil {
+		return fmt.Errorf("failed to list projects: %w", err)
+	}
+
+	if len(projects) == 0 {
+		fmt.Println("No projects found.")
+		return nil
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tNAME\tSLUG\tDESCRIPTION")
+	for _, p := range projects {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", p.ID, p.Name, p.Slug, p.Description)
+	}
+	return w.Flush()
+}
+
+// listAppsInProject renders all apps belonging to the named project. We
+// deliberately do NOT call resolveProjectAppEnv here — its single-app
+// auto-select would short-circuit into secrets listing instead of showing the
+// app list when a project happens to contain exactly one app.
+func listAppsInProject(vc *client.KagiClient, projectName string) error {
+	proj, err := findProject(vc, projectName)
+	if err != nil {
+		return err
+	}
+
+	apps, err := vc.ListApps(proj.Slug)
+	if err != nil {
+		return fmt.Errorf("failed to list apps: %w", err)
+	}
+
+	if len(apps) == 0 {
+		fmt.Println("No apps found.")
+		return nil
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tNAME\tSLUG\tDESCRIPTION")
+	for _, a := range apps {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", a.ID, a.Name, a.Slug, a.Description)
+	}
+	return w.Flush()
 }
 
 func runSecretSet(cmd *cobra.Command, args []string) error {

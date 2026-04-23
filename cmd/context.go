@@ -82,7 +82,7 @@ func resolveProjectAppEnv(cmd *cobra.Command, vc *client.KagiClient) (*resolvedC
 			appID = apps[0].ID
 			appSlug = apps[0].Slug
 		} else if len(apps) == 0 {
-			return nil, fmt.Errorf("no apps found in project %q. Create one with 'kagi app create'", projectName)
+			return nil, fmt.Errorf("no apps found in project %q. Create one with 'kagi secrets app create'", projectName)
 		} else {
 			return nil, fmt.Errorf("app not specified. Use --app flag or run 'kagi setup' to create a kagi.yaml")
 		}

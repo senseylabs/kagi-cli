@@ -51,7 +51,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to list projects: %w", err)
 		}
 		if len(projects) == 0 {
-			return fmt.Errorf("no projects found. Create one with 'kagi project create'")
+			return fmt.Errorf("no projects found. Create one with 'kagi secrets project create'")
 		}
 
 		fmt.Println("Select a project:")
@@ -88,7 +88,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to list apps: %w", err)
 		}
 		if len(apps) == 0 {
-			return fmt.Errorf("no apps found for project %q. Create one with 'kagi app create'", projectName)
+			return fmt.Errorf("no apps found for project %q. Create one with 'kagi secrets app create'", projectName)
 		}
 
 		if len(apps) == 1 {

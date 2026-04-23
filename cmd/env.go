@@ -68,7 +68,7 @@ func init() {
 	envCmd.AddCommand(envListCmd)
 	envCmd.AddCommand(envCreateCmd)
 	envCmd.AddCommand(envDeleteCmd)
-	rootCmd.AddCommand(envCmd)
+	// Registration under `secrets` happens in cmd/secrets.go init().
 }
 
 // projectRef holds the ID and slug for a resolved project.
