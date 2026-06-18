@@ -14,9 +14,11 @@ import (
 	kagi "github.com/senseylabs/kagi-sdk"
 
 	"github.com/senseylabs/kagi-cli/internal/auth"
+	"github.com/senseylabs/kagi-cli/internal/config"
 )
 
 // Re-export SDK types so existing CLI code doesn't break.
+type Organization = kagi.Organization
 type Project = kagi.Project
 type App = kagi.App
 type Environment = kagi.Environment
@@ -40,9 +42,26 @@ type KagiClient struct {
 	httpClient *http.Client
 	token      string
 	sdkClient  *kagi.Client
+
+	// orgID is the active organization UUID, sent as X-Organization-ID on JWT
+	// (human) write requests. Empty under PAT auth.
+	orgID string
+	// isPAT reports whether token came from KAGI_TOKEN (a Personal Access
+	// Token). When true the org header is never sent — the org is bound to the
+	// token server-side and a mismatched header returns 403.
+	isPAT bool
 }
 
-// NewKagiClientWithToken creates a client with an explicit token (used during login before org is resolved).
+// IsPAT reports whether this client authenticates with a Personal Access Token.
+func (c *KagiClient) IsPAT() bool { return c.isPAT }
+
+// OrgID returns the active organization UUID configured for JWT requests.
+func (c *KagiClient) OrgID() string { return c.orgID }
+
+// NewKagiClientWithToken creates a client with an explicit PAT (used during the
+// login flow to call read-only org endpoints before an org is selected). The
+// token is treated as a JWT so the org header may be attached if orgID is set;
+// pass an empty orgID for the org-discovery call right after device login.
 func NewKagiClientWithToken(baseURL, token string) *KagiClient {
 	return &KagiClient{
 		baseURL: baseURL,
@@ -50,7 +69,7 @@ func NewKagiClientWithToken(baseURL, token string) *KagiClient {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		sdkClient: kagi.NewClient(baseURL, token),
+		sdkClient: kagi.NewOrgClient(baseURL, token, "", false),
 	}
 }
 
@@ -64,12 +83,20 @@ func NewKagiClient(baseURL, issuerURL string) (*KagiClient, error) {
 		},
 	}
 
-	// Check KAGI_TOKEN env var first (PAT for CI)
+	// Check KAGI_TOKEN env var first (PAT for CI). A PAT is org-bound
+	// server-side, so we never attach X-Organization-ID — sending a mismatched
+	// org would be rejected with 403 (confused-deputy guard).
 	if pat := os.Getenv("KAGI_TOKEN"); pat != "" {
 		c.token = pat
-		c.sdkClient = kagi.NewClient(baseURL, pat)
+		c.isPAT = true
+		c.sdkClient = kagi.NewOrgClient(baseURL, pat, "", true)
 		return c, nil
 	}
+
+	// JWT (human) auth resolves the active org from the X-Organization-ID
+	// header, sourced from the persisted config (set via `kagi org use`).
+	cfg := config.Load()
+	c.orgID = cfg.OrganizationID
 
 	// Load JWT from credential store
 	store := auth.NewTokenStore()
@@ -116,13 +143,18 @@ func NewKagiClient(baseURL, issuerURL string) (*KagiClient, error) {
 	}
 
 	c.token = creds.AccessToken
-	c.sdkClient = kagi.NewClient(baseURL, creds.AccessToken)
+	c.sdkClient = kagi.NewOrgClient(baseURL, creds.AccessToken, c.orgID, false)
 	return c, nil
 }
 
 // ---------------------------------------------------------------------------
 // Read-only operations — delegated to the SDK client
 // ---------------------------------------------------------------------------
+
+// ListOrganizations returns the organizations the authenticated user belongs to.
+func (c *KagiClient) ListOrganizations() ([]Organization, error) {
+	return c.sdkClient.ListOrganizations(context.Background())
+}
 
 // ListProjects returns all projects.
 func (c *KagiClient) ListProjects() ([]Project, error) {
@@ -189,14 +221,17 @@ type SecretRevealResponse struct {
 // ---------------------------------------------------------------------------
 
 func (c *KagiClient) doRequest(method, path string) ([]byte, error) {
+	if err := c.requireOrgForJWT(); err != nil {
+		return nil, err
+	}
+
 	url := c.baseURL + path
 	req, err := http.NewRequest(method, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Content-Type", "application/json")
+	c.setAuthHeaders(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -239,8 +274,33 @@ func (c *KagiClient) doRequest(method, path string) ([]byte, error) {
 	return body, nil
 }
 
+// setAuthHeaders sets the Authorization + Content-Type headers and, for JWT
+// (human) auth only, the X-Organization-ID header. PAT auth omits the org
+// header — the org is bound to the token and a mismatch returns 403.
+func (c *KagiClient) setAuthHeaders(req *http.Request) {
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	if !c.isPAT && c.orgID != "" {
+		req.Header.Set(kagi.HeaderOrganizationID, c.orgID)
+	}
+}
+
+// requireOrgForJWT fails fast on JWT (human) write requests when no active
+// organization has been selected, rather than letting the backend reject the
+// request opaquely. PAT auth is exempt — the org is bound to the token.
+func (c *KagiClient) requireOrgForJWT() error {
+	if !c.isPAT && c.orgID == "" {
+		return fmt.Errorf("no organization selected. Run 'kagi org use <slug>' (see 'kagi org list')")
+	}
+	return nil
+}
+
 // doRequestWithBody sends an HTTP request with a JSON body and returns the response bytes.
 func (c *KagiClient) doRequestWithBody(method, path string, payload interface{}) ([]byte, error) {
+	if err := c.requireOrgForJWT(); err != nil {
+		return nil, err
+	}
+
 	url := c.baseURL + path
 
 	var bodyReader io.Reader
@@ -257,8 +317,7 @@ func (c *KagiClient) doRequestWithBody(method, path string, payload interface{})
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Content-Type", "application/json")
+	c.setAuthHeaders(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

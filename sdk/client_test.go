@@ -130,6 +130,139 @@ func TestFetchSecrets(t *testing.T) {
 	}
 }
 
+func TestListOrganizations(t *testing.T) {
+	orgs := []Organization{
+		{ID: "o1", Name: "Sensey", Slug: "sensey"},
+		{ID: "o2", Name: "Acme", Slug: "acme"},
+	}
+	ts := newTestServer(t, "/kagi/organizations", orgs)
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-token")
+	result, err := client.ListOrganizations(context.Background())
+	if err != nil {
+		t.Fatalf("ListOrganizations returned error: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected 2 organizations, got %d", len(result))
+	}
+	if result[0].Slug != "sensey" || result[0].ID != "o1" {
+		t.Errorf("unexpected first organization: %+v", result[0])
+	}
+	if result[1].Slug != "acme" {
+		t.Errorf("unexpected second organization: %+v", result[1])
+	}
+}
+
+// orgHeaderServer captures the X-Organization-ID header value the client sent.
+func orgHeaderServer(t *testing.T, gotHeader *string, present *bool) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		values, ok := r.Header[http.CanonicalHeaderKey(HeaderOrganizationID)]
+		*present = ok
+		if ok {
+			*gotHeader = values[0]
+		}
+		resp := map[string]interface{}{"data": []Project{}, "message": "ok", "status": 200}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+}
+
+func TestOrgHeader_SentForJWT(t *testing.T) {
+	var gotHeader string
+	var present bool
+	ts := orgHeaderServer(t, &gotHeader, &present)
+	defer ts.Close()
+
+	client := NewOrgClient(ts.URL, "jwt-token", "org-uuid-123", false /* isPAT */)
+	if _, err := client.ListProjects(context.Background()); err != nil {
+		t.Fatalf("ListProjects returned error: %v", err)
+	}
+
+	if !present {
+		t.Fatalf("expected %s header to be sent for JWT auth, but it was absent", HeaderOrganizationID)
+	}
+	if gotHeader != "org-uuid-123" {
+		t.Errorf("unexpected %s header: got %q, want %q", HeaderOrganizationID, gotHeader, "org-uuid-123")
+	}
+}
+
+func TestOrgHeader_NotSentForPAT(t *testing.T) {
+	var gotHeader string
+	var present bool
+	ts := orgHeaderServer(t, &gotHeader, &present)
+	defer ts.Close()
+
+	// Even with an orgID supplied, a PAT client must NOT send the header — the
+	// org is bound to the token and a mismatch would be rejected with 403.
+	client := NewOrgClient(ts.URL, "vv_pat_token", "org-uuid-123", true /* isPAT */)
+	if _, err := client.ListProjects(context.Background()); err != nil {
+		t.Fatalf("ListProjects returned error: %v", err)
+	}
+
+	if present {
+		t.Errorf("expected %s header to be absent for PAT auth, but got %q", HeaderOrganizationID, gotHeader)
+	}
+}
+
+func TestOrgScopedRequest_FailsFastWhenNoOrgSelected(t *testing.T) {
+	// An org-aware JWT client with no org selected must fail fast with an
+	// actionable error, never reaching the server.
+	reached := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	client := NewOrgClient(ts.URL, "jwt-token", "", false /* isPAT */)
+	_, err := client.ListProjects(context.Background())
+	if err == nil {
+		t.Fatal("expected ErrNoOrganizationSelected, got nil")
+	}
+	if err != ErrNoOrganizationSelected {
+		t.Errorf("unexpected error: got %v, want %v", err, ErrNoOrganizationSelected)
+	}
+	if reached {
+		t.Error("server should not have been reached when no org is selected")
+	}
+}
+
+func TestListOrganizations_AllowedWithoutOrgSelected(t *testing.T) {
+	// The org-list endpoint is the one org-scoped path reachable before an org
+	// is chosen — it is how the user discovers selectable orgs.
+	orgs := []Organization{{ID: "o1", Name: "Sensey", Slug: "sensey"}}
+	ts := newTestServer(t, "/kagi/organizations", orgs)
+	defer ts.Close()
+
+	client := NewOrgClient(ts.URL, "test-token", "", false /* isPAT */)
+	result, err := client.ListOrganizations(context.Background())
+	if err != nil {
+		t.Fatalf("ListOrganizations returned error: %v", err)
+	}
+	if len(result) != 1 || result[0].Slug != "sensey" {
+		t.Errorf("unexpected organizations: %+v", result)
+	}
+}
+
+func TestPlainClient_NotOrgGated(t *testing.T) {
+	// The bare NewClient is unopinionated: an empty orgID does not fail-fast and
+	// no org header is sent (back-compat for existing callers / PAT-style usage).
+	var present bool
+	var gotHeader string
+	ts := orgHeaderServer(t, &gotHeader, &present)
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-token")
+	if _, err := client.ListProjects(context.Background()); err != nil {
+		t.Fatalf("ListProjects returned error: %v", err)
+	}
+	if present {
+		t.Errorf("plain client should not send %s, got %q", HeaderOrganizationID, gotHeader)
+	}
+}
+
 func TestErrorHandling_Non200(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)

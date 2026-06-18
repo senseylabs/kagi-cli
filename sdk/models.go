@@ -1,6 +1,13 @@
 // Package kagi provides a read-only Go SDK for the Kagi secrets management API.
 package kagi
 
+// Organization represents a Kagi organization the user belongs to.
+type Organization struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Slug string `json:"slug"`
+}
+
 // Project represents a Kagi project.
 type Project struct {
 	ID          string `json:"id"`

@@ -19,6 +19,39 @@ kagi login
 
 Opens your browser for Keycloak authentication. Stores credentials in the macOS Keychain (or `~/.kagi/credentials` on Linux).
 
+After login, the CLI resolves your organization membership:
+
+- **One organization** — it is auto-selected and you are told which.
+- **Multiple organizations** — they are listed; pick one with `kagi org use <slug>`.
+- **None** — you are prompted to join/create an organization first.
+
+### Organizations
+
+Kagi is multi-organization. Human (JWT) commands act within a single **active
+organization**, sent to the API as the `X-Organization-ID` header (the org UUID).
+
+```bash
+# List the organizations you belong to (the active one is marked with *)
+kagi org list
+
+# Set the active organization by slug
+kagi org use sensey
+
+# Show the active organization
+kagi org current
+```
+
+The active organization (slug + UUID) is persisted to `~/.kagi/config.yaml`.
+If no organization is selected, org-scoped commands fail with a clear message
+asking you to run `kagi org use <slug>`.
+
+> **CI / `KAGI_TOKEN` (PAT):** a Personal Access Token is bound to one
+> organization server-side. PAT requests therefore send **no** org header and
+> need **no** `kagi org use` step — `KAGI_TOKEN=vv_... kagi pull ...` keeps
+> working with zero extra flags. Sending a mismatched `X-Organization-ID` with a
+> PAT is rejected by the backend (403), so the CLI never sends one. The
+> `kagi org` commands are JWT-only and refuse to run when `KAGI_TOKEN` is set.
+
 ### Setup
 
 Interactive setup wizard to configure your project and environment:
@@ -116,7 +149,12 @@ Place in the current directory or `~/.kagi/config.yaml`:
 api-url: https://kagi-api.sensey.io
 project: my-project
 environment: development
+organization: sensey                                    # active org slug (display)
+organization-id: 00000000-0000-0000-0000-000000000000   # active org UUID (header)
 ```
+
+The `organization` / `organization-id` keys are managed by `kagi org use` and
+`kagi login`; you normally don't edit them by hand.
 
 ### CI/CD
 

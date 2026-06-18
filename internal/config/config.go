@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -14,6 +15,11 @@ type Config struct {
 	Project     string `mapstructure:"project"`
 	App         string `mapstructure:"app"`
 	Environment string `mapstructure:"environment"`
+	// Organization is the active organization SLUG, kept for human-readable
+	// display. OrganizationID is the org UUID sent as the X-Organization-ID
+	// header on JWT requests.
+	Organization   string `mapstructure:"organization"`
+	OrganizationID string `mapstructure:"organization-id"`
 }
 
 // Load reads configuration from kagi.yaml in the current directory,
@@ -59,9 +65,55 @@ func Load() Config {
 				if cwdCfg.Environment != "" {
 					cfg.Environment = cwdCfg.Environment
 				}
+				if cwdCfg.Organization != "" {
+					cfg.Organization = cwdCfg.Organization
+				}
+				if cwdCfg.OrganizationID != "" {
+					cfg.OrganizationID = cwdCfg.OrganizationID
+				}
 			}
 		}
 	}
 
 	return cfg
+}
+
+// homeConfigPath returns the path to ~/.kagi/config.yaml.
+func homeConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".kagi", "config.yaml"), nil
+}
+
+// SaveOrganization persists the active organization (slug + UUID) to
+// ~/.kagi/config.yaml. It reads the existing home config first and rewrites it
+// so other keys (api-url, project, etc.) are preserved rather than clobbered.
+func SaveOrganization(slug, id string) error {
+	path, err := homeConfigPath()
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	v := viper.New()
+	v.SetConfigFile(path)
+	// Missing file is fine on first save; any other read error is surfaced.
+	if err := v.ReadInConfig(); err != nil {
+		if _, statErr := os.Stat(path); statErr == nil {
+			return fmt.Errorf("failed to read existing config %s: %w", path, err)
+		}
+	}
+
+	v.Set("organization", slug)
+	v.Set("organization-id", id)
+
+	if err := v.WriteConfigAs(path); err != nil {
+		return fmt.Errorf("failed to write config %s: %w", path, err)
+	}
+	return nil
 }

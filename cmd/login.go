@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/senseylabs/kagi-cli/internal/auth"
+	"github.com/senseylabs/kagi-cli/internal/client"
+	"github.com/senseylabs/kagi-cli/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -86,7 +88,44 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	fmt.Println("Login successful!")
 	fmt.Printf("API: %s\n", cfgAPIURL)
 
+	// Resolve organization membership. Non-fatal: a hiccup here must not block a
+	// successful login — the user can always run `kagi org use` later.
+	selectOrganizationAfterLogin(tokenResp.AccessToken)
+
 	return nil
+}
+
+// selectOrganizationAfterLogin lists the user's organizations and, when there is
+// exactly one, auto-selects it. With several it prints them and points the user
+// at `kagi org use`; with none it hints they need to create or join one. Every
+// branch is best-effort — failures are surfaced as warnings, never errors.
+func selectOrganizationAfterLogin(accessToken string) {
+	vc := client.NewKagiClientWithToken(cfgAPIURL, accessToken)
+	orgs, err := vc.ListOrganizations()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not load your organizations: %v — run 'kagi org list' to retry\n", err)
+		return
+	}
+
+	switch len(orgs) {
+	case 0:
+		fmt.Println()
+		fmt.Println("You do not belong to any organizations yet. Ask an admin to add you, then run 'kagi org use <slug>'.")
+	case 1:
+		org := orgs[0]
+		if err := config.SaveOrganization(org.Slug, org.ID); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not save active organization: %v — run 'kagi org use %s'\n", err, org.Slug)
+			return
+		}
+		fmt.Printf("Active organization: %s (%s)\n", org.Slug, org.Name)
+	default:
+		fmt.Println()
+		fmt.Println("You belong to multiple organizations:")
+		for _, o := range orgs {
+			fmt.Printf("  - %s (%s)\n", o.Slug, o.Name)
+		}
+		fmt.Println("Select one with: kagi org use <slug>")
+	}
 }
 
 func openBrowser(url string) {
