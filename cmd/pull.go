@@ -45,7 +45,7 @@ func runPull(cmd *cobra.Command, args []string) error {
 	}
 
 	// Fetch secrets
-	secrets, err := vc.FetchSecrets(ctx.AppID, ctx.EnvID)
+	secrets, err := vc.FetchSecrets(ctx.ProjectSlug, ctx.AppSlug, ctx.EnvID)
 	if err != nil {
 		return fmt.Errorf("failed to fetch secrets: %w", err)
 	}

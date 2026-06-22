@@ -237,7 +237,7 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no secrets to set")
 	}
 
-	if err := vc.SetSecrets(ctx.AppID, ctx.EnvID, secrets); err != nil {
+	if err := vc.SetSecrets(ctx.ProjectSlug, ctx.AppSlug, ctx.EnvID, secrets); err != nil {
 		return fmt.Errorf("failed to set secrets: %w", err)
 	}
 
@@ -263,7 +263,7 @@ func runSecretGet(cmd *cobra.Command, args []string) error {
 	keyName := args[0]
 
 	// List secrets to find the one with matching key name
-	secretsList, err := vc.ListSecrets(ctx.AppID, ctx.EnvID)
+	secretsList, err := vc.ListSecrets(ctx.ProjectSlug, ctx.AppSlug, ctx.EnvID)
 	if err != nil {
 		return fmt.Errorf("failed to list secrets: %w", err)
 	}
@@ -279,7 +279,7 @@ func runSecretGet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("secret %q not found", keyName)
 	}
 
-	revealed, err := vc.GetSecret(ctx.AppID, ctx.EnvID, secretID)
+	revealed, err := vc.GetSecret(ctx.ProjectSlug, ctx.AppSlug, ctx.EnvID, secretID)
 	if err != nil {
 		return fmt.Errorf("failed to get secret: %w", err)
 	}
@@ -306,7 +306,7 @@ func runSecretDelete(cmd *cobra.Command, args []string) error {
 	keyName := args[0]
 
 	// List secrets to find the one with matching key name
-	secretsList, err := vc.ListSecrets(ctx.AppID, ctx.EnvID)
+	secretsList, err := vc.ListSecrets(ctx.ProjectSlug, ctx.AppSlug, ctx.EnvID)
 	if err != nil {
 		return fmt.Errorf("failed to list secrets: %w", err)
 	}
@@ -337,7 +337,7 @@ func runSecretDelete(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if err := vc.DeleteSecret(ctx.AppID, ctx.EnvID, secretID); err != nil {
+	if err := vc.DeleteSecret(ctx.ProjectSlug, ctx.AppSlug, ctx.EnvID, secretID); err != nil {
 		return fmt.Errorf("failed to delete secret: %w", err)
 	}
 
@@ -360,7 +360,7 @@ func runSecretList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	secrets, err := vc.ListSecrets(ctx.AppID, ctx.EnvID)
+	secrets, err := vc.ListSecrets(ctx.ProjectSlug, ctx.AppSlug, ctx.EnvID)
 	if err != nil {
 		return fmt.Errorf("failed to list secrets: %w", err)
 	}

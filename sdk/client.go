@@ -104,9 +104,9 @@ func (c *Client) ListEnvironments(ctx context.Context, projectSlug string) ([]En
 }
 
 // FetchSecrets returns decrypted secrets as key-value pairs for an app's environment.
-func (c *Client) FetchSecrets(ctx context.Context, appID, environmentID string) (map[string]string, error) {
+func (c *Client) FetchSecrets(ctx context.Context, projectSlug, appSlug, environmentID string) (map[string]string, error) {
 	var resp APIResponse[SecretFetchResponse]
-	if err := c.doGet(ctx, fmt.Sprintf("/kagi/apps/%s/environments/%s/secrets/fetch", appID, environmentID), &resp); err != nil {
+	if err := c.doGet(ctx, fmt.Sprintf("/kagi/projects/%s/apps/%s/environments/%s/secrets/fetch", projectSlug, appSlug, environmentID), &resp); err != nil {
 		return nil, err
 	}
 	return resp.Data.Secrets, nil

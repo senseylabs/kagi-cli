@@ -111,11 +111,11 @@ func TestFetchSecrets(t *testing.T) {
 			"DB_PASSWORD": "secret123",
 		},
 	}
-	ts := newTestServer(t, "/kagi/apps/app-1/environments/env-1/secrets/fetch", secretData)
+	ts := newTestServer(t, "/kagi/projects/proj-1/apps/app-1/environments/env-1/secrets/fetch", secretData)
 	defer ts.Close()
 
 	client := NewClient(ts.URL, "test-token")
-	result, err := client.FetchSecrets(context.Background(), "app-1", "env-1")
+	result, err := client.FetchSecrets(context.Background(), "proj-1", "app-1", "env-1")
 	if err != nil {
 		t.Fatalf("FetchSecrets returned error: %v", err)
 	}

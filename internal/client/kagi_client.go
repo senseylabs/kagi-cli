@@ -172,8 +172,8 @@ func (c *KagiClient) ListEnvironments(projectSlug string) ([]Environment, error)
 }
 
 // FetchSecrets returns decrypted secrets as key-value pairs for an app's environment.
-func (c *KagiClient) FetchSecrets(appID, envID string) (map[string]string, error) {
-	return c.sdkClient.FetchSecrets(context.Background(), appID, envID)
+func (c *KagiClient) FetchSecrets(projectSlug, appSlug, envID string) (map[string]string, error) {
+	return c.sdkClient.FetchSecrets(context.Background(), projectSlug, appSlug, envID)
 }
 
 // ListCertificates returns all certificates.
@@ -439,7 +439,7 @@ func (c *KagiClient) DeleteApp(projectSlug, appID string) error {
 }
 
 // SetSecrets performs a bulk upsert of secrets for an app in an environment.
-func (c *KagiClient) SetSecrets(appID, envID string, secrets map[string]string) error {
+func (c *KagiClient) SetSecrets(projectSlug, appSlug, envID string, secrets map[string]string) error {
 	type secretEntry struct {
 		KeyName string `json:"keyName"`
 		Value   string `json:"value"`
@@ -454,13 +454,13 @@ func (c *KagiClient) SetSecrets(appID, envID string, secrets map[string]string) 
 		"secrets": entries,
 	}
 
-	_, err := c.doRequestWithBody("POST", fmt.Sprintf("/kagi/apps/%s/environments/%s/secrets/bulk", appID, envID), payload)
+	_, err := c.doRequestWithBody("POST", fmt.Sprintf("/kagi/projects/%s/apps/%s/environments/%s/secrets/bulk", projectSlug, appSlug, envID), payload)
 	return err
 }
 
 // GetSecret reveals (decrypts) a single secret by ID.
-func (c *KagiClient) GetSecret(appID, envID, secretID string) (*SecretRevealResponse, error) {
-	body, err := c.doRequest("GET", fmt.Sprintf("/kagi/apps/%s/environments/%s/secrets/%s/reveal", appID, envID, secretID))
+func (c *KagiClient) GetSecret(projectSlug, appSlug, envID, secretID string) (*SecretRevealResponse, error) {
+	body, err := c.doRequest("GET", fmt.Sprintf("/kagi/projects/%s/apps/%s/environments/%s/secrets/%s/reveal", projectSlug, appSlug, envID, secretID))
 	if err != nil {
 		return nil, err
 	}
@@ -474,14 +474,14 @@ func (c *KagiClient) GetSecret(appID, envID, secretID string) (*SecretRevealResp
 }
 
 // DeleteSecret deletes a secret by ID within an app's environment.
-func (c *KagiClient) DeleteSecret(appID, envID, secretID string) error {
-	_, err := c.doRequest("DELETE", fmt.Sprintf("/kagi/apps/%s/environments/%s/secrets/%s", appID, envID, secretID))
+func (c *KagiClient) DeleteSecret(projectSlug, appSlug, envID, secretID string) error {
+	_, err := c.doRequest("DELETE", fmt.Sprintf("/kagi/projects/%s/apps/%s/environments/%s/secrets/%s", projectSlug, appSlug, envID, secretID))
 	return err
 }
 
 // ListSecrets returns all secrets for an app's environment with masked values.
-func (c *KagiClient) ListSecrets(appID, envID string) ([]SecretListItem, error) {
-	body, err := c.doRequest("GET", fmt.Sprintf("/kagi/apps/%s/environments/%s/secrets", appID, envID))
+func (c *KagiClient) ListSecrets(projectSlug, appSlug, envID string) ([]SecretListItem, error) {
+	body, err := c.doRequest("GET", fmt.Sprintf("/kagi/projects/%s/apps/%s/environments/%s/secrets", projectSlug, appSlug, envID))
 	if err != nil {
 		return nil, err
 	}
