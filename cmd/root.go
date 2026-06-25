@@ -76,9 +76,9 @@ func initConfig() {
 	if cfgAPIURL == "" {
 		if v := os.Getenv("KAGI_API_URL"); v != "" {
 			cfgAPIURL = v
-		} else if cfg.APIURL != "" {
+		} else if cfg.APIURL != "" && !isStaleAPIURL(cfg.APIURL) {
 			cfgAPIURL = cfg.APIURL
-		} else if storedCreds.APIURL != "" {
+		} else if storedCreds.APIURL != "" && !isStaleAPIURL(storedCreds.APIURL) {
 			cfgAPIURL = storedCreds.APIURL
 		} else {
 			cfgAPIURL = prodAPIURL
@@ -105,6 +105,14 @@ func initConfig() {
 // authoritative and bypasses this filter.
 func isStaleIssuer(url string) bool {
 	return strings.Contains(url, "/realms/sensey")
+}
+
+// isStaleAPIURL rejects the pre-migration `kagi-api.sensey.io` API host so users
+// upgrading from older CLI versions (whose stored credentials or config cached
+// that host) don't have it win over the new `api.kagi.pw` default. The
+// KAGI_API_URL env var stays authoritative and bypasses this filter.
+func isStaleAPIURL(url string) bool {
+	return strings.Contains(url, "kagi-api.sensey.io")
 }
 
 func requireAuth() error {
