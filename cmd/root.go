@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	prodAPIURL  = "https://kagi-api.sensey.io"
+	prodAPIURL  = "https://api.kagi.pw"
 	prodIssuer  = "https://auth.sensey.io/realms/kagi"
 	devAPIURL   = "http://localhost:8081"
 	devIssuer   = "http://localhost:8085/realms/kagi"
