@@ -139,7 +139,7 @@ kagi secrets env delete -p my-project --slug production
 | Flag | Env var | Default |
 |------|---------|---------|
 | `--api-url` | `KAGI_API_URL` | `https://api.kagi.pw` |
-| `--issuer` | `KAGI_KEYCLOAK_ISSUER` | `https://auth.sensey.io/realms/kagi` |
+| `--issuer` | `KAGI_KEYCLOAK_ISSUER` | `https://auth.kagi.pw/realms/kagi` |
 
 ### Config file (`.kagi.yaml`)
 
