@@ -21,7 +21,7 @@ const (
 // Organization represents a Kagi organization the user belongs to.
 type Organization struct {
 	ID   string `json:"id"`
-	Name string `json:"name"`
+	Name string `json:"displayName"`
 	Slug string `json:"slug"`
 }
 
