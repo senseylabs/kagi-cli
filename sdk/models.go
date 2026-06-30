@@ -1,5 +1,22 @@
 // Package kagi provides a read-only Go SDK for the Kagi secrets management API.
+//
+// Addressing follows the folder model: secrets are addressed by an app's stable
+// internal ID plus an environment slug (the durable machine binding), while
+// folder paths are used only for browsing and one-time path -> app-ID
+// resolution at setup. Folder IDs are never sent by the SDK.
 package kagi
+
+// KagiLibrary is the URL slug identifying a Kagi folder library.
+type KagiLibrary string
+
+// Library slugs as accepted by the folder-browse routes.
+const (
+	LibrarySecrets       KagiLibrary = "secrets"
+	LibraryPasswords     KagiLibrary = "passwords"
+	LibraryAuthenticator KagiLibrary = "authenticator"
+	LibraryCertificates  KagiLibrary = "certificates"
+	LibraryAccessTokens  KagiLibrary = "access-tokens"
+)
 
 // Organization represents a Kagi organization the user belongs to.
 type Organization struct {
@@ -8,23 +25,39 @@ type Organization struct {
 	Slug string `json:"slug"`
 }
 
-// Project represents a Kagi project.
-type Project struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Slug        string `json:"slug"`
-	Description string `json:"description"`
-}
-
-// App represents a Kagi app within a project.
+// App represents a Kagi app exposed by a SECRETS folder's children listing.
+// The ID is the stable machine binding used to address secrets; renaming or
+// moving an app never changes it.
 type App struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Slug        string `json:"slug"`
-	Description string `json:"description"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Slug string `json:"slug"`
 }
 
-// Environment represents a Kagi environment within a project.
+// Folder represents a folder node within a Kagi library.
+type Folder struct {
+	ID         string  `json:"id"`
+	Name       string  `json:"name"`
+	Slug       string  `json:"slug"`
+	Path       string  `json:"path"`
+	Library    string  `json:"library"`
+	ParentID   *string `json:"parentId"`
+	OwnerID    *string `json:"ownerId"`
+	SystemRoot bool    `json:"systemRoot"`
+	CreatedAt  string  `json:"createdAt"`
+	UpdatedAt  string  `json:"updatedAt"`
+}
+
+// FolderChildren is the result of browsing a folder: its child folders and,
+// for the SECRETS library, the apps directly under it. Apps is empty for
+// non-SECRETS libraries.
+type FolderChildren struct {
+	Path    string   `json:"path"`
+	Folders []Folder `json:"folders"`
+	Apps    []App    `json:"apps"`
+}
+
+// Environment represents a Kagi environment within an app.
 type Environment struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`

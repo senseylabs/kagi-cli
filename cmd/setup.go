@@ -8,26 +8,28 @@ import (
 	"strings"
 
 	"github.com/senseylabs/kagi-cli/internal/client"
+	"github.com/senseylabs/kagi-cli/internal/config"
 	"github.com/spf13/cobra"
 )
 
 var (
-	setupProject string
-	setupApp     string
-	setupEnv     string
-	setupForce   bool
+	setupPath  string
+	setupEnv   string
+	setupForce bool
 )
 
 var setupCmd = &cobra.Command{
 	Use:   "setup",
-	Short: "Set up project, app, and environment for the current directory",
-	Long:  "Interactively select a project, app, and environment, then write a kagi.yaml config to the current directory.",
-	RunE:  runSetup,
+	Short: "Bind the current directory to a Kagi app and environment",
+	Long: "Resolve a secrets folder/app path to the app's stable internal ID and write a\n" +
+		"kagi.yaml binding (app-id + environment) to the current directory. Addressing\n" +
+		"thereafter uses the app ID, which survives app renames and folder moves.\n\n" +
+		"Pass --path and --env to skip the interactive folder browser.",
+	RunE: runSetup,
 }
 
 func init() {
-	setupCmd.Flags().StringVarP(&setupProject, "project", "p", "", "Project name (skip interactive selection)")
-	setupCmd.Flags().StringVarP(&setupApp, "app", "a", "", "App name (skip interactive selection)")
+	setupCmd.Flags().StringVarP(&setupPath, "path", "p", "", "Folder/app path, e.g. /village/kaizen (skip interactive browse)")
 	setupCmd.Flags().StringVarP(&setupEnv, "env", "e", "", "Environment slug (skip interactive selection)")
 	setupCmd.Flags().BoolVarP(&setupForce, "force", "f", false, "Overwrite existing kagi.yaml")
 	rootCmd.AddCommand(setupCmd)
@@ -43,113 +45,54 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Step 1: Resolve project
-	projectName := setupProject
-	if projectName == "" {
-		projects, err := vc.ListProjects()
+	// Step 1: resolve the folder/app path — from --path or by browsing the tree.
+	folderPath := setupPath
+	if folderPath == "" {
+		folderPath, err = browseForApp(vc)
 		if err != nil {
-			return fmt.Errorf("failed to list projects: %w", err)
+			return err
 		}
-		if len(projects) == 0 {
-			return fmt.Errorf("no projects found. Create one with 'kagi secrets project create'")
-		}
-
-		fmt.Println("Select a project:")
-		for i, p := range projects {
-			fmt.Printf("  %d. %s\n", i+1, p.Name)
-		}
-		fmt.Print("\nEnter number: ")
-
-		reader := bufio.NewReader(os.Stdin)
-		input, err := reader.ReadString('\n')
-		if err != nil {
-			return fmt.Errorf("failed to read input: %w", err)
-		}
-		input = strings.TrimSpace(input)
-
-		choice, err := strconv.Atoi(input)
-		if err != nil || choice < 1 || choice > len(projects) {
-			return fmt.Errorf("invalid selection: %s", input)
-		}
-		projectName = projects[choice-1].Name
 	}
 
-	// Step 2: Find project slug to list apps and environments
-	proj, err := findProject(vc, projectName)
+	// Step 2: resolve the path to the app's stable ID — the durable binding the
+	// config stores. Path resolution happens once, here, never on every command.
+	appID, err := vc.ResolveApp(folderPath)
 	if err != nil {
-		return err
+		return classifyAppError(err, folderPath)
 	}
 
-	// Step 3: Resolve app
-	appName := setupApp
-	if appName == "" {
-		apps, err := vc.ListApps(proj.Slug)
-		if err != nil {
-			return fmt.Errorf("failed to list apps: %w", err)
-		}
-		if len(apps) == 0 {
-			return fmt.Errorf("no apps found for project %q. Create one with 'kagi secrets app create'", projectName)
-		}
-
-		if len(apps) == 1 {
-			// Auto-select the only app
-			appName = apps[0].Name
-			fmt.Printf("\nAuto-selected app: %s\n", appName)
-		} else {
-			fmt.Println("\nSelect an app:")
-			for i, a := range apps {
-				fmt.Printf("  %d. %s\n", i+1, a.Name)
-			}
-			fmt.Print("\nEnter number: ")
-
-			reader := bufio.NewReader(os.Stdin)
-			input, err := reader.ReadString('\n')
-			if err != nil {
-				return fmt.Errorf("failed to read input: %w", err)
-			}
-			input = strings.TrimSpace(input)
-
-			choice, err := strconv.Atoi(input)
-			if err != nil || choice < 1 || choice > len(apps) {
-				return fmt.Errorf("invalid selection: %s", input)
-			}
-			appName = apps[choice-1].Name
-		}
+	// Step 3: resolve the environment — from --env or by selecting from the app's.
+	envs, err := vc.ListEnvironments(appID)
+	if err != nil {
+		return classifyAppError(err, appLabel(folderPath, appID))
+	}
+	if len(envs) == 0 {
+		return fmt.Errorf("app %s has no environments", appLabel(folderPath, appID))
 	}
 
-	// Step 4: Resolve environment
 	envSlug := setupEnv
 	if envSlug == "" {
-		envs, err := vc.ListEnvironments(proj.Slug)
+		envSlug, err = selectEnvironment(envs)
 		if err != nil {
-			return fmt.Errorf("failed to list environments: %w", err)
+			return err
 		}
-		if len(envs) == 0 {
-			return fmt.Errorf("no environments found for project %q", projectName)
+	} else {
+		matched := ""
+		available := make([]string, 0, len(envs))
+		for _, e := range envs {
+			available = append(available, e.Slug)
+			if strings.EqualFold(e.Slug, envSlug) {
+				matched = e.Slug
+			}
 		}
-
-		fmt.Println("\nSelect an environment:")
-		for i, e := range envs {
-			fmt.Printf("  %d. %s (%s)\n", i+1, e.Name, e.Slug)
+		if matched == "" {
+			return fmt.Errorf("environment %q not found in app %s. Available: %s", envSlug, appLabel(folderPath, appID), strings.Join(available, ", "))
 		}
-		fmt.Print("\nEnter number: ")
-
-		reader := bufio.NewReader(os.Stdin)
-		input, err := reader.ReadString('\n')
-		if err != nil {
-			return fmt.Errorf("failed to read input: %w", err)
-		}
-		input = strings.TrimSpace(input)
-
-		choice, err := strconv.Atoi(input)
-		if err != nil || choice < 1 || choice > len(envs) {
-			return fmt.Errorf("invalid selection: %s", input)
-		}
-		envSlug = envs[choice-1].Slug
+		envSlug = matched
 	}
 
-	// Step 5: Write kagi.yaml
-	if _, err := os.Stat("kagi.yaml"); err == nil && !setupForce {
+	// Step 4: write kagi.yaml.
+	if _, statErr := os.Stat("kagi.yaml"); statErr == nil && !setupForce {
 		fmt.Print("Configuration kagi.yaml already exists. Overwrite? [y/N]: ")
 		reader := bufio.NewReader(os.Stdin)
 		input, _ := reader.ReadString('\n')
@@ -159,11 +102,137 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	content := fmt.Sprintf("project: %s\napp: %s\nenvironment: %s\n", projectName, appName, envSlug)
-	if err := os.WriteFile("kagi.yaml", []byte(content), 0644); err != nil {
-		return fmt.Errorf("failed to write kagi.yaml: %w", err)
+	if err := writeSetupConfig(folderPath, appID, envSlug); err != nil {
+		return err
 	}
 
-	fmt.Printf("Configuration saved to kagi.yaml.\n  Project:     %s\n  App:         %s\n  Environment: %s\n", projectName, appName, envSlug)
+	fmt.Printf("Configuration saved to kagi.yaml.\n  Folder path: %s\n  App ID:      %s\n  Environment: %s\n", folderPath, appID, envSlug)
+	return nil
+}
+
+// browseForApp walks the SECRETS folder tree interactively and returns the
+// chosen app's full folder path. At each level the user descends into a child
+// folder or picks an app; picking an app ends the walk. Folder paths are only
+// used to resolve the app ID once — the returned path is informational.
+func browseForApp(vc *client.KagiClient) (string, error) {
+	reader := bufio.NewReader(os.Stdin)
+	path := "/"
+
+	for {
+		children, err := vc.ListFolderChildren(path)
+		if err != nil {
+			return "", fmt.Errorf("failed to browse %q: %w", path, err)
+		}
+
+		if len(children.Folders) == 0 && len(children.Apps) == 0 {
+			return "", fmt.Errorf("no folders or apps under %q. Create an app in the Kagi web app first", path)
+		}
+
+		// One combined numbered list: folders first (to descend into), then apps.
+		type entry struct {
+			isApp bool
+			name  string
+			slug  string
+		}
+		entries := make([]entry, 0, len(children.Folders)+len(children.Apps))
+		for _, f := range children.Folders {
+			entries = append(entries, entry{isApp: false, name: f.Name, slug: f.Slug})
+		}
+		for _, a := range children.Apps {
+			entries = append(entries, entry{isApp: true, name: a.Name, slug: a.Slug})
+		}
+
+		fmt.Printf("\n%s\n", path)
+		for i, e := range entries {
+			kind := "folder/"
+			if e.isApp {
+				kind = "app"
+			}
+			fmt.Printf("  %d. %s  (%s)\n", i+1, e.name, kind)
+		}
+		fmt.Print("\nSelect a number (or 'q' to abort): ")
+
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			return "", fmt.Errorf("failed to read input: %w", err)
+		}
+		input = strings.TrimSpace(input)
+		if strings.EqualFold(input, "q") {
+			return "", fmt.Errorf("setup aborted")
+		}
+
+		choice, err := strconv.Atoi(input)
+		if err != nil || choice < 1 || choice > len(entries) {
+			return "", fmt.Errorf("invalid selection: %s", input)
+		}
+
+		chosen := entries[choice-1]
+		path = joinFolderPath(path, chosen.slug)
+		if chosen.isApp {
+			return path, nil
+		}
+	}
+}
+
+// selectEnvironment prompts the user to choose an environment, auto-selecting
+// when the app has exactly one.
+func selectEnvironment(envs []client.Environment) (string, error) {
+	if len(envs) == 1 {
+		fmt.Printf("\nAuto-selected environment: %s (%s)\n", envs[0].Name, envs[0].Slug)
+		return envs[0].Slug, nil
+	}
+
+	fmt.Println("\nSelect an environment:")
+	for i, e := range envs {
+		fmt.Printf("  %d. %s (%s)\n", i+1, e.Name, e.Slug)
+	}
+	fmt.Print("\nEnter number: ")
+
+	reader := bufio.NewReader(os.Stdin)
+	input, err := reader.ReadString('\n')
+	if err != nil {
+		return "", fmt.Errorf("failed to read input: %w", err)
+	}
+	input = strings.TrimSpace(input)
+
+	choice, err := strconv.Atoi(input)
+	if err != nil || choice < 1 || choice > len(envs) {
+		return "", fmt.Errorf("invalid selection: %s", input)
+	}
+	return envs[choice-1].Slug, nil
+}
+
+// joinFolderPath appends a slug to a folder path, yielding an absolute,
+// single-slash-separated path (e.g. "/" + "village" -> "/village").
+func joinFolderPath(base, slug string) string {
+	if base == "" || base == "/" {
+		return "/" + slug
+	}
+	return strings.TrimRight(base, "/") + "/" + slug
+}
+
+// writeSetupConfig writes the folder-model kagi.yaml binding. Addressing uses
+// the stable app-id; folder-path is informational only. The active organization
+// (slug + UUID) is pinned when known so the binding is reproducible under JWT
+// auth — under a KAGI_TOKEN PAT the org is bound to the token and is ignored.
+func writeSetupConfig(folderPath, appID, envSlug string) error {
+	cfg := config.Load()
+
+	var sb strings.Builder
+	sb.WriteString("# Kagi binding for this directory. Secrets are addressed by the stable\n")
+	sb.WriteString("# app-id; folder-path is a human reference only and is not used for addressing.\n")
+	sb.WriteString(fmt.Sprintf("folder-path: %s\n", folderPath))
+	sb.WriteString(fmt.Sprintf("app-id: %s\n", appID))
+	sb.WriteString(fmt.Sprintf("environment: %s\n", envSlug))
+	if cfg.Organization != "" {
+		sb.WriteString(fmt.Sprintf("organization: %s\n", cfg.Organization))
+	}
+	if cfg.OrganizationID != "" {
+		sb.WriteString(fmt.Sprintf("organization-id: %s\n", cfg.OrganizationID))
+	}
+
+	if err := os.WriteFile("kagi.yaml", []byte(sb.String()), 0644); err != nil {
+		return fmt.Errorf("failed to write kagi.yaml: %w", err)
+	}
 	return nil
 }

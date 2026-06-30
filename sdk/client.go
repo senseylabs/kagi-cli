@@ -3,9 +3,11 @@ package kagi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -76,37 +78,80 @@ func (c *Client) ListOrganizations(ctx context.Context) ([]Organization, error) 
 	return resp.Data, nil
 }
 
-// ListProjects returns all projects accessible to the authenticated user.
-func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
-	var resp APIResponse[[]Project]
-	if err := c.doGet(ctx, "/kagi/projects", &resp); err != nil {
+// ListFolderChildren browses a folder by path and returns its child folders
+// and, for the SECRETS library, the apps directly under it. The path is the
+// human-readable folder path (e.g. "/fepatex/backend"); an empty or "/" path
+// browses the library root. It hits
+// GET /kagi/folders/{library}/children/{*path}.
+func (c *Client) ListFolderChildren(ctx context.Context, library KagiLibrary, path string) (*FolderChildren, error) {
+	var resp APIResponse[FolderChildren]
+	if err := c.doGet(ctx, folderChildrenPath(library, path), &resp); err != nil {
 		return nil, err
 	}
-	return resp.Data, nil
+	return &resp.Data, nil
 }
 
-// ListApps returns all apps within the specified project.
-func (c *Client) ListApps(ctx context.Context, projectSlug string) ([]App, error) {
-	var resp APIResponse[[]App]
-	if err := c.doGet(ctx, fmt.Sprintf("/kagi/projects/%s/apps", projectSlug), &resp); err != nil {
+// ErrAppNotFound is returned by ResolveApp when the parent folder is reachable
+// but contains no app with the requested slug. It is distinct from a transport
+// or authorization error on the browse itself, letting callers tell "app does
+// not exist" apart from "no access to the folder".
+var ErrAppNotFound = errors.New("app not found")
+
+// ResolveApp resolves a human-entered SECRETS folder path to an app's stable
+// internal ID. The final path segment is the app slug; the preceding segments
+// identify the folder the app lives in. The returned app ID is the durable
+// machine binding and should be captured once at setup, then used to address
+// secrets thereafter (it is stable across app renames and folder moves).
+func (c *Client) ResolveApp(ctx context.Context, folderPath string) (string, error) {
+	trimmed := strings.Trim(folderPath, "/")
+	if trimmed == "" {
+		return "", fmt.Errorf("kagi: folder path %q does not address an app", folderPath)
+	}
+
+	segments := strings.Split(trimmed, "/")
+	appSlug := segments[len(segments)-1]
+	parentPath := "/" + strings.Join(segments[:len(segments)-1], "/")
+
+	children, err := c.ListFolderChildren(ctx, LibrarySecrets, parentPath)
+	if err != nil {
+		return "", err
+	}
+
+	for _, app := range children.Apps {
+		if app.Slug == appSlug {
+			return app.ID, nil
+		}
+	}
+
+	return "", fmt.Errorf("kagi: no app with slug %q under folder %q: %w", appSlug, parentPath, ErrAppNotFound)
+}
+
+// ListApps returns the apps directly under a SECRETS folder path.
+func (c *Client) ListApps(ctx context.Context, folderPath string) ([]App, error) {
+	children, err := c.ListFolderChildren(ctx, LibrarySecrets, folderPath)
+	if err != nil {
 		return nil, err
 	}
-	return resp.Data, nil
+	return children.Apps, nil
 }
 
-// ListEnvironments returns all environments within the specified project.
-func (c *Client) ListEnvironments(ctx context.Context, projectSlug string) ([]Environment, error) {
+// ListEnvironments returns all environments for an app, addressed by its stable
+// app ID. It hits GET /kagi/apps/{appId}/environments.
+func (c *Client) ListEnvironments(ctx context.Context, appID string) ([]Environment, error) {
 	var resp APIResponse[[]Environment]
-	if err := c.doGet(ctx, fmt.Sprintf("/kagi/projects/%s/environments", projectSlug), &resp); err != nil {
+	if err := c.doGet(ctx, fmt.Sprintf("/kagi/apps/%s/environments", appID), &resp); err != nil {
 		return nil, err
 	}
 	return resp.Data, nil
 }
 
-// FetchSecrets returns decrypted secrets as key-value pairs for an app's environment.
-func (c *Client) FetchSecrets(ctx context.Context, projectSlug, appSlug, environmentID string) (map[string]string, error) {
+// FetchSecrets returns decrypted secrets as key-value pairs for an app's
+// environment, addressed by the stable app ID and the environment slug. It hits
+// GET /kagi/apps/{appId}/environments/{environmentSlug}/secrets/fetch (the
+// plaintext machine-fetch variant).
+func (c *Client) FetchSecrets(ctx context.Context, appID, environmentSlug string) (map[string]string, error) {
 	var resp APIResponse[SecretFetchResponse]
-	if err := c.doGet(ctx, fmt.Sprintf("/kagi/projects/%s/apps/%s/environments/%s/secrets/fetch", projectSlug, appSlug, environmentID), &resp); err != nil {
+	if err := c.doGet(ctx, fmt.Sprintf("/kagi/apps/%s/environments/%s/secrets/fetch", appID, environmentSlug), &resp); err != nil {
 		return nil, err
 	}
 	return resp.Data.Secrets, nil
@@ -155,6 +200,25 @@ const orgListPath = "/kagi/organizations"
 // ErrNoOrganizationSelected is returned for org-scoped JWT requests when no
 // active organization has been configured.
 var ErrNoOrganizationSelected = fmt.Errorf("no organization selected. Run 'kagi org use <slug>' (see 'kagi org list')")
+
+// folderChildrenPath builds the folder-children browse URL. The Kagi route uses
+// a terminal capturing wildcard (/kagi/folders/{library}/children/{*path}), so
+// the path is appended last with a single leading slash; an empty/"/" path
+// browses the root (no trailing segment).
+func folderChildrenPath(library KagiLibrary, path string) string {
+	return "/kagi/folders/" + string(library) + "/children" + normalizeFolderPath(path)
+}
+
+// normalizeFolderPath collapses a folder path to the canonical wildcard suffix:
+// "" for the root, or "/seg1/seg2" otherwise. Folder slugs are [a-z0-9-] only,
+// so no URL escaping is required.
+func normalizeFolderPath(path string) string {
+	trimmed := strings.Trim(path, "/")
+	if trimmed == "" {
+		return ""
+	}
+	return "/" + trimmed
+}
 
 // doGet performs an authenticated GET request, reads the response body, and
 // unmarshals the JSON into result. It returns an error for non-2xx status codes.

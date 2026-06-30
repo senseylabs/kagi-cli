@@ -10,16 +10,38 @@ import (
 
 // Config holds the configuration loaded from kagi.yaml files.
 type Config struct {
-	APIURL      string `mapstructure:"api-url"`
-	Issuer      string `mapstructure:"issuer"`
-	Project     string `mapstructure:"project"`
-	App         string `mapstructure:"app"`
+	APIURL string `mapstructure:"api-url"`
+	Issuer string `mapstructure:"issuer"`
+
+	// AppID is the durable machine binding under the folder model: the app's
+	// stable internal ID, resolved once from a folder path at setup. All secret
+	// addressing uses this ID, which survives app renames and folder moves.
+	AppID string `mapstructure:"app-id"`
+	// FolderPath is the human-readable secrets path the AppID was resolved from
+	// (e.g. "/village/kaizen"). It is documentation only — addressing never uses
+	// it — and is kept so a human can see which app the config points at.
+	FolderPath string `mapstructure:"folder-path"`
+	// Environment is the environment slug (e.g. "production").
 	Environment string `mapstructure:"environment"`
+
+	// Project and App are LEGACY pre-folder-model fields. They are no longer used
+	// for addressing; they are loaded only so the CLI can detect a stale config
+	// and prompt the user to re-run setup (see IsLegacy).
+	Project string `mapstructure:"project"`
+	App     string `mapstructure:"app"`
+
 	// Organization is the active organization SLUG, kept for human-readable
 	// display. OrganizationID is the org UUID sent as the X-Organization-ID
 	// header on JWT requests.
 	Organization   string `mapstructure:"organization"`
 	OrganizationID string `mapstructure:"organization-id"`
+}
+
+// IsLegacy reports whether a loaded config still uses the pre-folder-model
+// project/app binding and lacks an AppID. Such a config can no longer address
+// secrets and must be regenerated with 'kagi setup'.
+func (c Config) IsLegacy() bool {
+	return c.AppID == "" && (c.Project != "" || c.App != "")
 }
 
 // Load reads configuration from kagi.yaml in the current directory,
@@ -55,6 +77,12 @@ func Load() Config {
 				}
 				if cwdCfg.Issuer != "" {
 					cfg.Issuer = cwdCfg.Issuer
+				}
+				if cwdCfg.AppID != "" {
+					cfg.AppID = cwdCfg.AppID
+				}
+				if cwdCfg.FolderPath != "" {
+					cfg.FolderPath = cwdCfg.FolderPath
 				}
 				if cwdCfg.Project != "" {
 					cfg.Project = cwdCfg.Project

@@ -20,7 +20,7 @@ var runCmd = &cobra.Command{
 }
 
 func init() {
-	addProjectAppEnvFlags(runCmd)
+	addSecretFlags(runCmd)
 	rootCmd.AddCommand(runCmd)
 }
 
@@ -44,13 +44,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx, err := resolveProjectAppEnv(cmd, vc)
+	ctx, err := resolveAppEnv(cmd, vc)
 	if err != nil {
 		return err
 	}
 
 	// Fetch all secrets
-	secrets, err := vc.FetchSecrets(ctx.ProjectSlug, ctx.AppSlug, ctx.EnvID)
+	secrets, err := vc.FetchSecrets(ctx.AppID, ctx.EnvSlug)
 	if err != nil {
 		return fmt.Errorf("failed to fetch secrets: %w", err)
 	}

@@ -3,6 +3,7 @@ package kagi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -38,40 +39,58 @@ func newTestServer(t *testing.T, wantPath string, data interface{}) *httptest.Se
 	}))
 }
 
-func TestListProjects(t *testing.T) {
-	projects := []Project{
-		{ID: "p1", Name: "Project One", Slug: "project-one", Description: "First project"},
-		{ID: "p2", Name: "Project Two", Slug: "project-two", Description: "Second project"},
+func TestListFolderChildren(t *testing.T) {
+	children := FolderChildren{
+		Path:    "/village",
+		Folders: []Folder{{ID: "f1", Name: "Backend", Slug: "backend", Path: "/village/backend"}},
+		Apps:    []App{{ID: "a1", Name: "Kaizen", Slug: "kaizen"}},
 	}
-	ts := newTestServer(t, "/kagi/projects", projects)
+	ts := newTestServer(t, "/kagi/folders/secrets/children/village", children)
 	defer ts.Close()
 
 	client := NewClient(ts.URL, "test-token")
-	result, err := client.ListProjects(context.Background())
+	result, err := client.ListFolderChildren(context.Background(), LibrarySecrets, "/village")
 	if err != nil {
-		t.Fatalf("ListProjects returned error: %v", err)
+		t.Fatalf("ListFolderChildren returned error: %v", err)
 	}
-	if len(result) != 2 {
-		t.Fatalf("expected 2 projects, got %d", len(result))
+	if len(result.Folders) != 1 || result.Folders[0].Slug != "backend" {
+		t.Errorf("unexpected folders: %+v", result.Folders)
 	}
-	if result[0].ID != "p1" || result[0].Name != "Project One" {
-		t.Errorf("unexpected first project: %+v", result[0])
+	if len(result.Apps) != 1 || result.Apps[0].ID != "a1" {
+		t.Errorf("unexpected apps: %+v", result.Apps)
 	}
-	if result[1].ID != "p2" || result[1].Name != "Project Two" {
-		t.Errorf("unexpected second project: %+v", result[1])
+}
+
+func TestListFolderChildren_Root(t *testing.T) {
+	// An empty/"/" path browses the library root: the wildcard suffix is empty,
+	// so the URL ends at .../children with no trailing segment.
+	children := FolderChildren{Path: "/", Folders: []Folder{{ID: "f1", Slug: "village"}}}
+	ts := newTestServer(t, "/kagi/folders/secrets/children", children)
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-token")
+	result, err := client.ListFolderChildren(context.Background(), LibrarySecrets, "/")
+	if err != nil {
+		t.Fatalf("ListFolderChildren returned error: %v", err)
+	}
+	if len(result.Folders) != 1 || result.Folders[0].Slug != "village" {
+		t.Errorf("unexpected folders: %+v", result.Folders)
 	}
 }
 
 func TestListApps(t *testing.T) {
-	apps := []App{
-		{ID: "a1", Name: "App One", Slug: "app-one", Description: "First app"},
-		{ID: "a2", Name: "App Two", Slug: "app-two", Description: "Second app"},
+	children := FolderChildren{
+		Path: "/village",
+		Apps: []App{
+			{ID: "a1", Name: "App One", Slug: "app-one"},
+			{ID: "a2", Name: "App Two", Slug: "app-two"},
+		},
 	}
-	ts := newTestServer(t, "/kagi/projects/proj-123/apps", apps)
+	ts := newTestServer(t, "/kagi/folders/secrets/children/village", children)
 	defer ts.Close()
 
 	client := NewClient(ts.URL, "test-token")
-	result, err := client.ListApps(context.Background(), "proj-123")
+	result, err := client.ListApps(context.Background(), "/village")
 	if err != nil {
 		t.Fatalf("ListApps returned error: %v", err)
 	}
@@ -83,16 +102,74 @@ func TestListApps(t *testing.T) {
 	}
 }
 
+func TestResolveApp(t *testing.T) {
+	// ResolveApp browses the PARENT folder of the app and matches the final path
+	// segment (the app slug) to return the stable app ID.
+	children := FolderChildren{
+		Path: "/village",
+		Apps: []App{
+			{ID: "app-kaizen", Name: "Kaizen", Slug: "kaizen"},
+			{ID: "app-korur", Name: "Korur", Slug: "korur"},
+		},
+	}
+	ts := newTestServer(t, "/kagi/folders/secrets/children/village", children)
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-token")
+	appID, err := client.ResolveApp(context.Background(), "/village/kaizen")
+	if err != nil {
+		t.Fatalf("ResolveApp returned error: %v", err)
+	}
+	if appID != "app-kaizen" {
+		t.Errorf("unexpected app ID: got %q, want %q", appID, "app-kaizen")
+	}
+}
+
+func TestResolveApp_NotFound(t *testing.T) {
+	// A reachable parent folder with no matching app slug yields ErrAppNotFound,
+	// distinguishing "app does not exist" from a transport/authorization failure.
+	children := FolderChildren{Path: "/village", Apps: []App{{ID: "app-korur", Slug: "korur"}}}
+	ts := newTestServer(t, "/kagi/folders/secrets/children/village", children)
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-token")
+	_, err := client.ResolveApp(context.Background(), "/village/kaizen")
+	if err == nil {
+		t.Fatal("expected ErrAppNotFound, got nil")
+	}
+	if !errors.Is(err, ErrAppNotFound) {
+		t.Errorf("expected ErrAppNotFound, got %v", err)
+	}
+}
+
+func TestResolveApp_EmptyPath(t *testing.T) {
+	// A bare "/" does not address an app — it must error without a request.
+	reached := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-token")
+	if _, err := client.ResolveApp(context.Background(), "/"); err == nil {
+		t.Fatal("expected error for empty path, got nil")
+	}
+	if reached {
+		t.Error("server should not have been reached for an empty path")
+	}
+}
+
 func TestListEnvironments(t *testing.T) {
 	envs := []Environment{
 		{ID: "e1", Name: "Production", Slug: "production"},
 		{ID: "e2", Name: "Staging", Slug: "staging"},
 	}
-	ts := newTestServer(t, "/kagi/projects/proj-123/environments", envs)
+	ts := newTestServer(t, "/kagi/apps/app-123/environments", envs)
 	defer ts.Close()
 
 	client := NewClient(ts.URL, "test-token")
-	result, err := client.ListEnvironments(context.Background(), "proj-123")
+	result, err := client.ListEnvironments(context.Background(), "app-123")
 	if err != nil {
 		t.Fatalf("ListEnvironments returned error: %v", err)
 	}
@@ -111,11 +188,11 @@ func TestFetchSecrets(t *testing.T) {
 			"DB_PASSWORD": "secret123",
 		},
 	}
-	ts := newTestServer(t, "/kagi/projects/proj-1/apps/app-1/environments/env-1/secrets/fetch", secretData)
+	ts := newTestServer(t, "/kagi/apps/app-1/environments/production/secrets/fetch", secretData)
 	defer ts.Close()
 
 	client := NewClient(ts.URL, "test-token")
-	result, err := client.FetchSecrets(context.Background(), "proj-1", "app-1", "env-1")
+	result, err := client.FetchSecrets(context.Background(), "app-1", "production")
 	if err != nil {
 		t.Fatalf("FetchSecrets returned error: %v", err)
 	}
@@ -163,7 +240,7 @@ func orgHeaderServer(t *testing.T, gotHeader *string, present *bool) *httptest.S
 		if ok {
 			*gotHeader = values[0]
 		}
-		resp := map[string]interface{}{"data": []Project{}, "message": "ok", "status": 200}
+		resp := map[string]interface{}{"data": []Environment{}, "message": "ok", "status": 200}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	}))
@@ -176,8 +253,8 @@ func TestOrgHeader_SentForJWT(t *testing.T) {
 	defer ts.Close()
 
 	client := NewOrgClient(ts.URL, "jwt-token", "org-uuid-123", false /* isPAT */)
-	if _, err := client.ListProjects(context.Background()); err != nil {
-		t.Fatalf("ListProjects returned error: %v", err)
+	if _, err := client.ListEnvironments(context.Background(), "app-1"); err != nil {
+		t.Fatalf("ListEnvironments returned error: %v", err)
 	}
 
 	if !present {
@@ -197,8 +274,8 @@ func TestOrgHeader_NotSentForPAT(t *testing.T) {
 	// Even with an orgID supplied, a PAT client must NOT send the header — the
 	// org is bound to the token and a mismatch would be rejected with 403.
 	client := NewOrgClient(ts.URL, "vv_pat_token", "org-uuid-123", true /* isPAT */)
-	if _, err := client.ListProjects(context.Background()); err != nil {
-		t.Fatalf("ListProjects returned error: %v", err)
+	if _, err := client.ListEnvironments(context.Background(), "app-1"); err != nil {
+		t.Fatalf("ListEnvironments returned error: %v", err)
 	}
 
 	if present {
@@ -217,7 +294,7 @@ func TestOrgScopedRequest_FailsFastWhenNoOrgSelected(t *testing.T) {
 	defer ts.Close()
 
 	client := NewOrgClient(ts.URL, "jwt-token", "", false /* isPAT */)
-	_, err := client.ListProjects(context.Background())
+	_, err := client.ListEnvironments(context.Background(), "app-1")
 	if err == nil {
 		t.Fatal("expected ErrNoOrganizationSelected, got nil")
 	}
@@ -255,8 +332,8 @@ func TestPlainClient_NotOrgGated(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ts.URL, "test-token")
-	if _, err := client.ListProjects(context.Background()); err != nil {
-		t.Fatalf("ListProjects returned error: %v", err)
+	if _, err := client.ListEnvironments(context.Background(), "app-1"); err != nil {
+		t.Fatalf("ListEnvironments returned error: %v", err)
 	}
 	if present {
 		t.Errorf("plain client should not send %s, got %q", HeaderOrganizationID, gotHeader)
@@ -271,7 +348,7 @@ func TestErrorHandling_Non200(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ts.URL, "test-token")
-	_, err := client.ListProjects(context.Background())
+	_, err := client.ListEnvironments(context.Background(), "app-1")
 	if err == nil {
 		t.Fatal("expected error for 403 response, got nil")
 	}
@@ -286,7 +363,7 @@ func TestErrorHandling_NetworkError(t *testing.T) {
 	ts.Close()
 
 	client := NewClient(ts.URL, "test-token")
-	_, err := client.ListProjects(context.Background())
+	_, err := client.ListEnvironments(context.Background(), "app-1")
 	if err == nil {
 		t.Fatal("expected error for closed server, got nil")
 	}
@@ -295,7 +372,7 @@ func TestErrorHandling_NetworkError(t *testing.T) {
 func TestErrorHandling_CancelledContext(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{"data": []Project{}, "message": "ok", "status": 200})
+		json.NewEncoder(w).Encode(map[string]interface{}{"data": []Environment{}, "message": "ok", "status": 200})
 	}))
 	defer ts.Close()
 
@@ -303,7 +380,7 @@ func TestErrorHandling_CancelledContext(t *testing.T) {
 	cancel() // cancel immediately
 
 	client := NewClient(ts.URL, "test-token")
-	_, err := client.ListProjects(ctx)
+	_, err := client.ListEnvironments(ctx, "app-1")
 	if err == nil {
 		t.Fatal("expected error for cancelled context, got nil")
 	}

@@ -18,12 +18,12 @@ var (
 var pullCmd = &cobra.Command{
 	Use:   "pull",
 	Short: "Fetch secrets as KEY=VALUE pairs",
-	Long:  "Fetches secrets from Kagi for a given project, app, and environment. Outputs as KEY=VALUE to stdout or to a file.",
+	Long:  "Fetches secrets from Kagi for a given app and environment. Outputs as KEY=VALUE to stdout or to a file.",
 	RunE:  runPull,
 }
 
 func init() {
-	addProjectAppEnvFlags(pullCmd)
+	addSecretFlags(pullCmd)
 	pullCmd.Flags().StringVar(&pullOutput, "output", "", "Output file path (writes .env file)")
 	pullCmd.Flags().StringVar(&pullFormat, "format", "env", "Output format: env or json")
 	rootCmd.AddCommand(pullCmd)
@@ -39,13 +39,13 @@ func runPull(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx, err := resolveProjectAppEnv(cmd, vc)
+	ctx, err := resolveAppEnv(cmd, vc)
 	if err != nil {
 		return err
 	}
 
 	// Fetch secrets
-	secrets, err := vc.FetchSecrets(ctx.ProjectSlug, ctx.AppSlug, ctx.EnvID)
+	secrets, err := vc.FetchSecrets(ctx.AppID, ctx.EnvSlug)
 	if err != nil {
 		return fmt.Errorf("failed to fetch secrets: %w", err)
 	}

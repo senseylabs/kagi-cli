@@ -19,8 +19,9 @@ import (
 
 // Re-export SDK types so existing CLI code doesn't break.
 type Organization = kagi.Organization
-type Project = kagi.Project
 type App = kagi.App
+type Folder = kagi.Folder
+type FolderChildren = kagi.FolderChildren
 type Environment = kagi.Environment
 type SecretFetchResponse = kagi.SecretFetchResponse
 type CertificateListItem = kagi.CertificateListItem
@@ -156,24 +157,33 @@ func (c *KagiClient) ListOrganizations() ([]Organization, error) {
 	return c.sdkClient.ListOrganizations(context.Background())
 }
 
-// ListProjects returns all projects.
-func (c *KagiClient) ListProjects() ([]Project, error) {
-	return c.sdkClient.ListProjects(context.Background())
+// ListFolderChildren browses a SECRETS folder path and returns its child
+// folders and the apps directly under it.
+func (c *KagiClient) ListFolderChildren(path string) (*FolderChildren, error) {
+	return c.sdkClient.ListFolderChildren(context.Background(), kagi.LibrarySecrets, path)
 }
 
-// ListApps returns all apps for a project.
-func (c *KagiClient) ListApps(projectSlug string) ([]App, error) {
-	return c.sdkClient.ListApps(context.Background(), projectSlug)
+// ListApps returns the apps directly under a SECRETS folder path.
+func (c *KagiClient) ListApps(folderPath string) ([]App, error) {
+	return c.sdkClient.ListApps(context.Background(), folderPath)
 }
 
-// ListEnvironments returns all environments for a project.
-func (c *KagiClient) ListEnvironments(projectSlug string) ([]Environment, error) {
-	return c.sdkClient.ListEnvironments(context.Background(), projectSlug)
+// ResolveApp resolves a human-entered SECRETS folder/app path to the app's
+// stable internal ID — the durable machine binding captured once at setup.
+func (c *KagiClient) ResolveApp(folderPath string) (string, error) {
+	return c.sdkClient.ResolveApp(context.Background(), folderPath)
 }
 
-// FetchSecrets returns decrypted secrets as key-value pairs for an app's environment.
-func (c *KagiClient) FetchSecrets(projectSlug, appSlug, envID string) (map[string]string, error) {
-	return c.sdkClient.FetchSecrets(context.Background(), projectSlug, appSlug, envID)
+// ListEnvironments returns all environments for an app, addressed by its
+// stable app ID.
+func (c *KagiClient) ListEnvironments(appID string) ([]Environment, error) {
+	return c.sdkClient.ListEnvironments(context.Background(), appID)
+}
+
+// FetchSecrets returns decrypted secrets as key-value pairs for an app's
+// environment, addressed by the stable app ID and the environment slug.
+func (c *KagiClient) FetchSecrets(appID, envSlug string) (map[string]string, error) {
+	return c.sdkClient.FetchSecrets(context.Background(), appID, envSlug)
 }
 
 // ListCertificates returns all certificates.
@@ -360,86 +370,18 @@ func (c *KagiClient) doRequestWithBody(method, path string, payload interface{})
 	return body, nil
 }
 
-// CreateProject creates a new Kagi project.
-func (c *KagiClient) CreateProject(name, description string) (*Project, error) {
-	payload := map[string]string{
-		"name":        name,
-		"description": description,
-	}
-
-	body, err := c.doRequestWithBody("POST", "/kagi/projects", payload)
-	if err != nil {
-		return nil, err
-	}
-
-	var resp kagi.APIResponse[Project]
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("failed to parse create project response: %w", err)
-	}
-
-	return &resp.Data, nil
+// secretsBasePath builds the folder-model secrets base URL for an app's
+// environment: /kagi/apps/{appId}/environments/{envSlug}/secrets.
+func secretsBasePath(appID, envSlug string) string {
+	return fmt.Sprintf("/kagi/apps/%s/environments/%s/secrets", appID, envSlug)
 }
 
-// DeleteProject deletes a Kagi project by ID.
-func (c *KagiClient) DeleteProject(projectID string) error {
-	_, err := c.doRequest("DELETE", fmt.Sprintf("/kagi/projects/%s", projectID))
-	return err
-}
-
-// CreateEnvironment creates a new environment within a project.
-func (c *KagiClient) CreateEnvironment(projectSlug, name, slug string) (*Environment, error) {
-	payload := map[string]string{
-		"name": name,
-		"slug": slug,
-	}
-
-	body, err := c.doRequestWithBody("POST", fmt.Sprintf("/kagi/projects/%s/environments", projectSlug), payload)
-	if err != nil {
-		return nil, err
-	}
-
-	var resp kagi.APIResponse[Environment]
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("failed to parse create environment response: %w", err)
-	}
-
-	return &resp.Data, nil
-}
-
-// DeleteEnvironment deletes an environment by ID within a project.
-func (c *KagiClient) DeleteEnvironment(projectSlug, envID string) error {
-	_, err := c.doRequest("DELETE", fmt.Sprintf("/kagi/projects/%s/environments/%s", projectSlug, envID))
-	return err
-}
-
-// CreateApp creates a new app within a project.
-func (c *KagiClient) CreateApp(projectSlug, name, description string) (*App, error) {
-	payload := map[string]string{
-		"name":        name,
-		"description": description,
-	}
-
-	body, err := c.doRequestWithBody("POST", fmt.Sprintf("/kagi/projects/%s/apps", projectSlug), payload)
-	if err != nil {
-		return nil, err
-	}
-
-	var resp kagi.APIResponse[App]
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("failed to parse create app response: %w", err)
-	}
-
-	return &resp.Data, nil
-}
-
-// DeleteApp deletes an app by ID within a project.
-func (c *KagiClient) DeleteApp(projectSlug, appID string) error {
-	_, err := c.doRequest("DELETE", fmt.Sprintf("/kagi/projects/%s/apps/%s", projectSlug, appID))
-	return err
-}
-
-// SetSecrets performs a bulk upsert of secrets for an app in an environment.
-func (c *KagiClient) SetSecrets(projectSlug, appSlug, envID string, secrets map[string]string) error {
+// SetSecrets performs a bulk upsert of secrets for an app's environment,
+// addressed by the stable app ID and the environment slug.
+//
+// NOTE: writes require human (JWT) auth — a KAGI_TOKEN PAT is read-only at the
+// backend and a write returns 403.
+func (c *KagiClient) SetSecrets(appID, envSlug string, secrets map[string]string) error {
 	type secretEntry struct {
 		KeyName string `json:"keyName"`
 		Value   string `json:"value"`
@@ -454,13 +396,14 @@ func (c *KagiClient) SetSecrets(projectSlug, appSlug, envID string, secrets map[
 		"secrets": entries,
 	}
 
-	_, err := c.doRequestWithBody("POST", fmt.Sprintf("/kagi/projects/%s/apps/%s/environments/%s/secrets/bulk", projectSlug, appSlug, envID), payload)
+	_, err := c.doRequestWithBody("POST", secretsBasePath(appID, envSlug)+"/bulk", payload)
 	return err
 }
 
-// GetSecret reveals (decrypts) a single secret by ID.
-func (c *KagiClient) GetSecret(projectSlug, appSlug, envID, secretID string) (*SecretRevealResponse, error) {
-	body, err := c.doRequest("GET", fmt.Sprintf("/kagi/projects/%s/apps/%s/environments/%s/secrets/%s/reveal", projectSlug, appSlug, envID, secretID))
+// GetSecret reveals (decrypts) a single secret by ID within an app's
+// environment.
+func (c *KagiClient) GetSecret(appID, envSlug, secretID string) (*SecretRevealResponse, error) {
+	body, err := c.doRequest("GET", fmt.Sprintf("%s/%s/reveal", secretsBasePath(appID, envSlug), secretID))
 	if err != nil {
 		return nil, err
 	}
@@ -474,14 +417,14 @@ func (c *KagiClient) GetSecret(projectSlug, appSlug, envID, secretID string) (*S
 }
 
 // DeleteSecret deletes a secret by ID within an app's environment.
-func (c *KagiClient) DeleteSecret(projectSlug, appSlug, envID, secretID string) error {
-	_, err := c.doRequest("DELETE", fmt.Sprintf("/kagi/projects/%s/apps/%s/environments/%s/secrets/%s", projectSlug, appSlug, envID, secretID))
+func (c *KagiClient) DeleteSecret(appID, envSlug, secretID string) error {
+	_, err := c.doRequest("DELETE", fmt.Sprintf("%s/%s", secretsBasePath(appID, envSlug), secretID))
 	return err
 }
 
 // ListSecrets returns all secrets for an app's environment with masked values.
-func (c *KagiClient) ListSecrets(projectSlug, appSlug, envID string) ([]SecretListItem, error) {
-	body, err := c.doRequest("GET", fmt.Sprintf("/kagi/projects/%s/apps/%s/environments/%s/secrets", projectSlug, appSlug, envID))
+func (c *KagiClient) ListSecrets(appID, envSlug string) ([]SecretListItem, error) {
+	body, err := c.doRequest("GET", secretsBasePath(appID, envSlug))
 	if err != nil {
 		return nil, err
 	}
