@@ -3,6 +3,7 @@ module github.com/senseylabs/kagi-cli
 go 1.25.3
 
 require (
+	github.com/gofrs/flock v0.12.1
 	github.com/senseylabs/kagi-sdk v0.0.0
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/viper v1.19.0

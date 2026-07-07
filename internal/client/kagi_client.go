@@ -113,34 +113,67 @@ func NewKagiClient(baseURL, issuerURL string) (*KagiClient, error) {
 
 	c.issuerURL = issuerURL
 
-	// Refresh if expired
+	// Refresh if expired.
+	//
+	// This whole load-refresh-store sequence is guarded by a cross-process
+	// advisory lock. When several `kagi` processes start at once (e.g. one per
+	// app in a dev start script) with an expired token, they would otherwise all
+	// refresh and store concurrently: on macOS that races the keychain write
+	// (concurrent `security add-generic-password` -> errSecDuplicateItem, exit
+	// status 45), and it presents the shared refresh token N times, which breaks
+	// under refresh-token rotation. With the lock, exactly one process refreshes;
+	// the rest re-load the freshly stored credentials and skip the network call.
 	if time.Now().After(creds.ExpiresAt) {
-		refreshIssuer := creds.IssuerURL
-		if refreshIssuer == "" {
-			refreshIssuer = issuerURL
-		}
-		deviceFlow := auth.NewDeviceFlow(refreshIssuer, "cli", auth.DefaultScope)
-		endpoints, err := deviceFlow.DiscoverEndpoints()
+		lock, err := auth.AcquireRefreshLock()
 		if err != nil {
+			return nil, err
+		}
+		defer lock.Release()
+
+		// Double-checked expiry: another process may have refreshed while we
+		// waited on the lock, so re-load to act on the latest stored credentials.
+		// The pre-lock Load already succeeded, so a failure here means the store
+		// went bad underneath us — fail rather than fall back to the stale creds
+		// and present an already-rotated refresh token, which reuse detection can
+		// treat as a breach and revoke the whole token family.
+		fresh, loadErr := store.Load()
+		if loadErr != nil {
 			return nil, fmt.Errorf("session expired. Run 'kagi login' to re-authenticate")
 		}
+		creds = fresh
 
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		newToken, err := deviceFlow.RefreshToken(ctx, endpoints.TokenEndpoint, creds.RefreshToken)
-		cancel()
-		if err != nil {
-			return nil, fmt.Errorf("session expired. Run 'kagi login' to re-authenticate")
+		if time.Now().After(creds.ExpiresAt) {
+			refreshIssuer := creds.IssuerURL
+			if refreshIssuer == "" {
+				refreshIssuer = issuerURL
+			}
+			deviceFlow := auth.NewDeviceFlow(refreshIssuer, "cli", auth.DefaultScope)
+			endpoints, err := deviceFlow.DiscoverEndpoints()
+			if err != nil {
+				return nil, fmt.Errorf("session expired. Run 'kagi login' to re-authenticate")
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			newToken, err := deviceFlow.RefreshToken(ctx, endpoints.TokenEndpoint, creds.RefreshToken)
+			cancel()
+			if err != nil {
+				return nil, fmt.Errorf("session expired. Run 'kagi login' to re-authenticate")
+			}
+
+			creds.AccessToken = newToken.AccessToken
+			if newToken.RefreshToken != "" {
+				creds.RefreshToken = newToken.RefreshToken
+			}
+			creds.ExpiresAt = time.Now().Add(time.Duration(newToken.ExpiresIn) * time.Second)
+
+			if err := store.Save(creds); err != nil {
+				return nil, fmt.Errorf("failed to save refreshed credentials: %w", err)
+			}
 		}
 
-		creds.AccessToken = newToken.AccessToken
-		if newToken.RefreshToken != "" {
-			creds.RefreshToken = newToken.RefreshToken
-		}
-		creds.ExpiresAt = time.Now().Add(time.Duration(newToken.ExpiresIn) * time.Second)
-
-		if err := store.Save(creds); err != nil {
-			return nil, fmt.Errorf("failed to save refreshed credentials: %w", err)
-		}
+		// Release before client construction; the deferred Release above is an
+		// idempotent no-op backstop that also covers the early-return paths.
+		lock.Release()
 	}
 
 	c.token = creds.AccessToken

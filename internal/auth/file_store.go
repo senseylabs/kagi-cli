@@ -32,7 +32,27 @@ func (f *fileStore) Save(creds Credentials) error {
 		return fmt.Errorf("failed to serialize credentials: %w", err)
 	}
 
-	if err := os.WriteFile(f.path, data, 0600); err != nil {
+	// Write to a temp file in the same directory, then atomically rename it over
+	// the target. os.WriteFile truncates in place, so a concurrent reader (e.g.
+	// another kagi process loading credentials at startup) could otherwise observe
+	// a half-written file and fail to parse it. Rename is atomic on POSIX and
+	// effectively so on NTFS, so readers always see the old or the new complete
+	// file, never a partial one. os.CreateTemp creates the file with 0600.
+	tmp, err := os.CreateTemp(dir, ".credentials-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp credentials file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }() // best-effort cleanup if we bail before rename
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("failed to write temp credentials file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("failed to close temp credentials file: %w", err)
+	}
+	if err := os.Rename(tmpName, f.path); err != nil {
 		return fmt.Errorf("failed to write credentials file: %w", err)
 	}
 	return nil
