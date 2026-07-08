@@ -12,6 +12,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// personalEnvSlug is the reserved environment slug for a user's personal
+// environment. The backend addresses it as a normal environment by this slug
+// (GET/POST /kagi/apps/{appId}/environments/personal/secrets...). It is
+// user-scoped: available to human (JWT) callers only, never to machine/CI
+// (PAT) tokens. The --personal flag is sugar for --env personal.
+const personalEnvSlug = "personal"
+
 // resolvedContext holds the resolved folder-model addressing for a secret
 // operation: the app's stable internal ID and the environment slug. FolderPath
 // is carried for human-readable error/output messages only.
@@ -40,15 +47,36 @@ func resolveAppEnv(cmd *cobra.Command, vc *client.KagiClient) (*resolvedContext,
 	pathFlag, _ := cmd.Flags().GetString("path")
 	appIDFlag, _ := cmd.Flags().GetString("app-id")
 	envFlag, _ := cmd.Flags().GetString("env")
+	personalFlag, _ := cmd.Flags().GetBool("personal")
 
 	cfg := config.Load()
 
+	// --personal is sugar for --env personal. It and an explicit --env are
+	// mutually exclusive: allowing both only invites a silent conflict. The one
+	// exception is --env personal, which names the same target.
+	if personalFlag && envFlag != "" && !strings.EqualFold(envFlag, personalEnvSlug) {
+		return nil, fmt.Errorf("use either --personal or --env, not both")
+	}
+
+	// Env-slug precedence: --personal (forces the personal slug) > --env >
+	// kagi.yaml environment. Selection stays explicit — no implicit fallback.
 	envSlug := envFlag
+	if personalFlag {
+		envSlug = personalEnvSlug
+	}
 	if envSlug == "" {
 		envSlug = cfg.Environment
 	}
 	if envSlug == "" {
 		return nil, fmt.Errorf("environment not specified. Use --env flag or run 'kagi setup' to create a kagi.yaml")
+	}
+
+	// PAT guard: the personal environment is user-scoped and rejected by the
+	// backend for machine/CI (PAT) tokens. Fail fast with an actionable message
+	// before any network call, whether personal was requested via --personal or
+	// --env personal. No silent fallback to another environment.
+	if vc.IsPAT() && strings.EqualFold(envSlug, personalEnvSlug) {
+		return nil, fmt.Errorf("personal secrets are user-scoped and not available to machine/CI (PAT) tokens; run with a user login ('kagi login') or select a shared environment")
 	}
 
 	// Resolve the app ID. Priority: explicit --app-id, then --path resolution,
@@ -167,13 +195,15 @@ func isStatus(err error, status int) bool {
 
 // addSecretFlags adds the folder-model addressing flags to a command:
 //
-//	--path     human folder/app path, resolved once to the app ID
-//	--app-id   the app's stable internal ID (skips path resolution)
-//	--env      environment slug
+//	--path      human folder/app path, resolved once to the app ID
+//	--app-id    the app's stable internal ID (skips path resolution)
+//	--env       environment slug
+//	--personal  sugar for --env personal (user login only, not PAT)
 //
-// All three override the kagi.yaml binding for the single invocation.
+// All override the kagi.yaml binding for the single invocation.
 func addSecretFlags(cmd *cobra.Command) {
 	cmd.Flags().StringP("path", "p", "", "Folder/app path, e.g. /village/kaizen (overrides kagi.yaml)")
 	cmd.Flags().String("app-id", "", "App ID — the stable machine binding (overrides --path and kagi.yaml)")
 	cmd.Flags().StringP("env", "e", "", "Environment slug (overrides kagi.yaml)")
+	cmd.Flags().Bool("personal", false, "Target your personal environment (sugar for --env personal; requires a user login, not a PAT)")
 }
