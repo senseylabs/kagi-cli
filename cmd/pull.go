@@ -39,7 +39,10 @@ func runPull(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx, err := resolveAppEnv(cmd, vc)
+	// pull opts into the personal fallback: if --personal is passed but the app
+	// has no personal environment, fall back to the kagi.yaml environment. The
+	// warning is emitted on stderr, so the KEY=VALUE stdout stream stays clean.
+	ctx, err := resolveAppEnvWith(cmd, vc, resolveOpts{allowPersonalFallback: true})
 	if err != nil {
 		return err
 	}

@@ -60,6 +60,37 @@ Interactive setup wizard to configure your project and environment:
 kagi setup
 ```
 
+### Personal environments (`--personal`)
+
+`--personal` targets your own personal environment for an app — sugar for
+`--env personal`. It is available on `run`, `pull`, and the `secrets`
+subcommands:
+
+```bash
+kagi run --personal -- npm run dev
+kagi pull --personal --output .env
+kagi secrets list --personal
+```
+
+Personal environments are **user-scoped**: they require an interactive
+`kagi login` (JWT). A Personal Access Token (`KAGI_TOKEN`, used in CI) is
+rejected with a clear error and never falls back to a shared environment.
+
+**Fallback (run/pull only).** Not every app has a personal environment. When
+you pass `--personal` to `run` or `pull` and the app has none, the CLI falls
+back to the environment in your `kagi.yaml` and prints a warning to **stderr**
+(stdout stays a clean `KEY=VALUE` stream for `pull`):
+
+```
+warning: app "/clients/fepatex/api" (…) has no "personal" environment; falling back to "local" from kagi.yaml
+```
+
+The `secrets` subcommands (`set`, `get`, `delete`, `list`, `envs`) are
+**strict**: `--personal` against an app with no personal environment is a hard
+error, never a silent redirect — writing to a shared environment by accident
+would affect every developer who pulls it. Naming the environment explicitly
+with `--env personal` is likewise always strict, even on `run`/`pull`.
+
 ### Pull secrets
 
 ```bash

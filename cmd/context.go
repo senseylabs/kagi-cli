@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	kagi "github.com/senseylabs/kagi-sdk"
@@ -36,14 +37,32 @@ var upgradeErr = errors.New(
 		"  Re-run 'kagi setup' to bind to a folder path + environment and capture the app ID,\n" +
 		"  or set the binding explicitly with --path <folder/app path> --env <env> (or --app-id <id> --env <env>)")
 
-// resolveAppEnv resolves the app ID and environment slug for a secret operation
-// from flags first, then the kagi.yaml / ~/.kagi/config.yaml binding.
+// resolveOpts tunes how resolveAppEnvWith behaves for a single call site.
+//
+// allowPersonalFallback opts a caller into the personal-environment fallback:
+// when the user passes --personal but the target app has no personal
+// environment, resolution falls back to the kagi.yaml environment (with a
+// stderr warning) instead of failing. It is enabled ONLY for `run` and `pull`.
+// The `secrets` subcommands leave it off: a silent fallback there would write
+// to (or read/delete from) the shared environment every developer pulls, so
+// they must keep the strict "environment not found" error.
+type resolveOpts struct{ allowPersonalFallback bool }
+
+// resolveAppEnv resolves the app ID and environment slug with the strict,
+// no-fallback default. All `secrets` subcommands use this so a missing personal
+// environment is a hard error, never a silent redirect to a shared environment.
+func resolveAppEnv(cmd *cobra.Command, vc *client.KagiClient) (*resolvedContext, error) {
+	return resolveAppEnvWith(cmd, vc, resolveOpts{})
+}
+
+// resolveAppEnvWith resolves the app ID and environment slug for a secret
+// operation from flags first, then the kagi.yaml / ~/.kagi/config.yaml binding.
 //
 // Addressing is by app ID. A human-friendly --path (or the config folder-path)
 // is resolved to the app ID once via the folder-browse route. The resolved app
 // and environment are verified so callers get a distinguishing error: app does
 // not exist / no access to app / environment does not exist.
-func resolveAppEnv(cmd *cobra.Command, vc *client.KagiClient) (*resolvedContext, error) {
+func resolveAppEnvWith(cmd *cobra.Command, vc *client.KagiClient, opts resolveOpts) (*resolvedContext, error) {
 	pathFlag, _ := cmd.Flags().GetString("path")
 	appIDFlag, _ := cmd.Flags().GetString("app-id")
 	envFlag, _ := cmd.Flags().GetString("env")
@@ -59,7 +78,11 @@ func resolveAppEnv(cmd *cobra.Command, vc *client.KagiClient) (*resolvedContext,
 	}
 
 	// Env-slug precedence: --personal (forces the personal slug) > --env >
-	// kagi.yaml environment. Selection stays explicit — no implicit fallback.
+	// kagi.yaml environment. Selection stays explicit here. The one exception is
+	// the opt-in personal fallback (run/pull only, opts.allowPersonalFallback):
+	// if --personal names a personal environment the app does not have, the
+	// kagi.yaml environment is used instead with a warning (see chooseEnvSlug).
+	// An explicit --env personal is never redirected; nor is any secrets call.
 	envSlug := envFlag
 	if personalFlag {
 		envSlug = personalEnvSlug
@@ -74,7 +97,9 @@ func resolveAppEnv(cmd *cobra.Command, vc *client.KagiClient) (*resolvedContext,
 	// PAT guard: the personal environment is user-scoped and rejected by the
 	// backend for machine/CI (PAT) tokens. Fail fast with an actionable message
 	// before any network call, whether personal was requested via --personal or
-	// --env personal. No silent fallback to another environment.
+	// --env personal. This stays a HARD ERROR even for run/pull — the personal
+	// fallback below never applies to a PAT, so CI can never silently drift onto
+	// a shared environment.
 	if vc.IsPAT() && strings.EqualFold(envSlug, personalEnvSlug) {
 		return nil, fmt.Errorf("personal secrets are user-scoped and not available to machine/CI (PAT) tokens; run with a user login ('kagi login') or select a shared environment")
 	}
@@ -109,20 +134,14 @@ func resolveAppEnv(cmd *cobra.Command, vc *client.KagiClient) (*resolvedContext,
 		return nil, classifyAppError(err, appLabel(folderPath, appID))
 	}
 
-	found := false
-	available := make([]string, 0, len(envs))
-	for _, e := range envs {
-		available = append(available, e.Slug)
-		if strings.EqualFold(e.Slug, envSlug) {
-			envSlug = e.Slug
-			found = true
-		}
+	envSlug, warning, err := chooseEnvSlug(envSlug, personalFlag, opts.allowPersonalFallback, cfg.Environment, envs, appLabel(folderPath, appID))
+	if err != nil {
+		return nil, err
 	}
-	if !found {
-		if len(available) == 0 {
-			return nil, fmt.Errorf("environment %q not found: app %s has no environments", envSlug, appLabel(folderPath, appID))
-		}
-		return nil, fmt.Errorf("environment %q not found in app %s. Available: %s", envSlug, appLabel(folderPath, appID), strings.Join(available, ", "))
+	if warning != "" {
+		// Warnings go to stderr, never stdout: `kagi pull` streams KEY=VALUE to
+		// stdout for consumers to parse/eval, and a warning there would corrupt it.
+		fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
 	}
 
 	return &resolvedContext{
@@ -130,6 +149,71 @@ func resolveAppEnv(cmd *cobra.Command, vc *client.KagiClient) (*resolvedContext,
 		EnvSlug:    envSlug,
 		FolderPath: folderPath,
 	}, nil
+}
+
+// chooseEnvSlug picks the environment to use, given what the user asked for and
+// what the app actually has. Returns the chosen canonical slug and, when a
+// fallback occurred, a non-empty warning to surface on stderr.
+//
+// Rules, applied in order:
+//  1. requested matches an available slug case-insensitively -> return the
+//     canonical slug from the API (preserving the API's normalization), no
+//     warning.
+//  2. else, when a fallback is permitted (run/pull) AND --personal was the
+//     source of the request AND the kagi.yaml environment is set and itself
+//     matches an available slug -> return that canonical slug plus a warning.
+//  3. else -> today's strict "not found" error, verbatim, reporting the
+//     originally requested slug (so it still reads "personal").
+//
+// The fallback is gated on personalFlag, NOT on requested == personalEnvSlug:
+// someone who typed --env personal explicitly named a target and must get the
+// strict error, never a silent redirect.
+//
+// appLabel is the human-readable app identifier woven into the warning and the
+// strict errors so both stay verbatim; it is not a decision input.
+func chooseEnvSlug(
+	requested string,
+	personalFlag bool,
+	allowFallback bool,
+	configEnv string,
+	available []client.Environment,
+	appLabel string,
+) (slug string, warning string, err error) {
+	// Rule 1: exact (case-insensitive) match wins, normalized to the API's slug.
+	if canonical, ok := matchEnvSlug(requested, available); ok {
+		return canonical, "", nil
+	}
+
+	// Rule 2: opt-in personal fallback to the kagi.yaml environment.
+	if allowFallback && personalFlag && configEnv != "" {
+		if canonical, ok := matchEnvSlug(configEnv, available); ok {
+			warning = fmt.Sprintf(
+				"app %s has no %q environment; falling back to %q from kagi.yaml",
+				appLabel, personalEnvSlug, canonical)
+			return canonical, warning, nil
+		}
+	}
+
+	// Rule 3: strict errors, reporting the originally requested slug.
+	if len(available) == 0 {
+		return "", "", fmt.Errorf("environment %q not found: app %s has no environments", requested, appLabel)
+	}
+	slugs := make([]string, len(available))
+	for i, e := range available {
+		slugs[i] = e.Slug
+	}
+	return "", "", fmt.Errorf("environment %q not found in app %s. Available: %s", requested, appLabel, strings.Join(slugs, ", "))
+}
+
+// matchEnvSlug looks up want among the available environments case-insensitively
+// and returns the canonical slug (the API's casing) when found.
+func matchEnvSlug(want string, available []client.Environment) (string, bool) {
+	for _, e := range available {
+		if strings.EqualFold(e.Slug, want) {
+			return e.Slug, true
+		}
+	}
+	return "", false
 }
 
 // resolveAppOnly resolves just the app ID (no environment) from flags then the
