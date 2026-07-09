@@ -31,17 +31,36 @@ func runLogout(cmd *cobra.Command, args []string) error {
 
 	// Best-effort server-side revocation. Never block local logout on network issues.
 	if creds.RefreshToken != "" && creds.IssuerURL != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
+		// Discovery and revocation get separate budgets. DiscoverEndpoints now
+		// retries internally via httpx.GetWithRetry, so it needs the more
+		// generous window; sharing a single 5s budget with revocation would
+		// regress the effective cold-start tolerance this branch exists to add.
+		const (
+			// discoveryTimeout restores the prior effective tolerance and leaves
+			// room for roughly one internal retry through a Keycloak cold start.
+			discoveryTimeout = 15 * time.Second
+			// revocationTimeout is the fresh, independent budget for the revoke
+			// call so a slow discovery cannot eat into it.
+			revocationTimeout = 5 * time.Second
+		)
 
 		deviceFlow := auth.NewDeviceFlow(creds.IssuerURL, "cli", auth.DefaultScope)
-		endpoints, err := deviceFlow.DiscoverEndpoints()
+
+		discoveryCtx, discoveryCancel := context.WithTimeout(context.Background(), discoveryTimeout)
+		defer discoveryCancel()
+
+		endpoints, err := deviceFlow.DiscoverEndpoints(discoveryCtx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: server-side token revocation failed: %v — your tokens remain valid on the server until their lifetime expires\n", err)
 		} else if endpoints.RevocationEndpoint == "" {
 			fmt.Fprintf(os.Stderr, "warning: server-side token revocation failed: revocation_endpoint not advertised by issuer — your tokens remain valid on the server until their lifetime expires\n")
-		} else if err := deviceFlow.RevokeToken(ctx, endpoints.RevocationEndpoint, creds.RefreshToken); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: server-side token revocation failed: %v — your tokens remain valid on the server until their lifetime expires\n", err)
+		} else {
+			revocationCtx, revocationCancel := context.WithTimeout(context.Background(), revocationTimeout)
+			defer revocationCancel()
+
+			if err := deviceFlow.RevokeToken(revocationCtx, endpoints.RevocationEndpoint, creds.RefreshToken); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: server-side token revocation failed: %v — your tokens remain valid on the server until their lifetime expires\n", err)
+			}
 		}
 	}
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/senseylabs/kagi-cli/internal/auth"
 	"github.com/senseylabs/kagi-cli/internal/config"
@@ -11,10 +12,14 @@ import (
 )
 
 const (
-	prodAPIURL  = "https://api.kagi.pw"
-	prodIssuer  = "https://auth.kagi.pw/realms/kagi"
-	devAPIURL   = "http://localhost:8081"
-	devIssuer   = "http://localhost:8085/realms/kagi"
+	prodAPIURL = "https://api.kagi.pw"
+	prodIssuer = "https://auth.kagi.pw/realms/kagi"
+	devAPIURL  = "http://localhost:8081"
+	devIssuer  = "http://localhost:8085/realms/kagi"
+
+	// defaultDiscoveryTimeout is the overall budget for OIDC discovery retries,
+	// overridable via KAGI_DISCOVERY_TIMEOUT.
+	defaultDiscoveryTimeout = 90 * time.Second
 )
 
 var (
@@ -22,6 +27,13 @@ var (
 	cfgIssuer  string
 	cfgDevMode bool
 	appVersion string
+
+	// cfgDiscoveryTimeout is the overall budget for OIDC discovery (see login).
+	// cfgDiscoveryTimeoutErr holds a parse error for KAGI_DISCOVERY_TIMEOUT so
+	// the consuming command can surface it rather than silently ignoring it —
+	// initConfig runs via cobra.OnInitialize and cannot return an error itself.
+	cfgDiscoveryTimeout    = defaultDiscoveryTimeout
+	cfgDiscoveryTimeoutErr error
 )
 
 func SetVersion(v string) {
@@ -97,6 +109,22 @@ func initConfig() {
 		}
 	}
 
+	// KAGI_DISCOVERY_TIMEOUT overrides the discovery retry budget (a Go duration,
+	// e.g. "45s"). An invalid value must not be silently ignored: record the
+	// error so the login command surfaces it and keep the safe default meanwhile.
+	cfgDiscoveryTimeout = defaultDiscoveryTimeout
+	cfgDiscoveryTimeoutErr = nil
+	if v := os.Getenv("KAGI_DISCOVERY_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		switch {
+		case err != nil:
+			cfgDiscoveryTimeoutErr = fmt.Errorf("invalid KAGI_DISCOVERY_TIMEOUT %q: %w", v, err)
+		case d <= 0:
+			cfgDiscoveryTimeoutErr = fmt.Errorf("invalid KAGI_DISCOVERY_TIMEOUT %q: must be a positive duration", v)
+		default:
+			cfgDiscoveryTimeout = d
+		}
+	}
 }
 
 // isStaleIssuer rejects issuer URLs from the pre-migration `sensey` realm so
@@ -125,4 +153,3 @@ func requireAuth() error {
 	}
 	return nil
 }
-

@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -10,6 +13,7 @@ import (
 	"github.com/senseylabs/kagi-cli/internal/auth"
 	"github.com/senseylabs/kagi-cli/internal/client"
 	"github.com/senseylabs/kagi-cli/internal/config"
+	"github.com/senseylabs/kagi-cli/internal/httpx"
 	"github.com/spf13/cobra"
 )
 
@@ -25,16 +29,34 @@ func init() {
 }
 
 func runLogin(cmd *cobra.Command, args []string) error {
+	// A bad KAGI_DISCOVERY_TIMEOUT is surfaced here (initConfig cannot return an
+	// error) rather than being silently ignored.
+	if cfgDiscoveryTimeoutErr != nil {
+		return cfgDiscoveryTimeoutErr
+	}
+
 	if cfgDevMode {
 		fmt.Println("Using local development URLs")
 	}
 
 	deviceFlow := auth.NewDeviceFlow(cfgIssuer, "cli", auth.DefaultScope)
 
-	// Step 1: Discover OIDC endpoints
+	// Step 1: Discover OIDC endpoints. The overall retry budget is the context
+	// deadline; per-attempt timeouts and backoff live inside httpx.GetWithRetry.
 	fmt.Println("Discovering Keycloak endpoints...")
-	endpoints, err := deviceFlow.DiscoverEndpoints()
+	ctx, cancel := context.WithTimeout(context.Background(), cfgDiscoveryTimeout)
+	defer cancel()
+
+	endpoints, err := deviceFlow.DiscoverEndpoints(ctx)
 	if err != nil {
+		if errors.Is(err, httpx.ErrRetryBudgetExhausted) {
+			return fmt.Errorf(
+				"could not reach the Kagi auth service at %s after %s.\n"+
+					"It may be restarting — wait a minute and run `kagi login` again.\n"+
+					"If this persists, check %s/.well-known/openid-configuration directly.\n"+
+					"(last error: %w)",
+				issuerHost(cfgIssuer), cfgDiscoveryTimeout, cfgIssuer, err)
+		}
 		return fmt.Errorf("failed to discover OIDC endpoints: %w", err)
 	}
 
@@ -126,6 +148,17 @@ func selectOrganizationAfterLogin(accessToken string) {
 		}
 		fmt.Println("Select one with: kagi org use <slug>")
 	}
+}
+
+// issuerHost renders the scheme+host of an issuer URL for user-facing messages
+// (e.g. "https://auth.kagi.pw"), falling back to the raw issuer if it cannot be
+// parsed so we never drop context in an error.
+func issuerHost(issuer string) string {
+	u, err := url.Parse(issuer)
+	if err != nil || u.Host == "" {
+		return issuer
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 func openBrowser(url string) {

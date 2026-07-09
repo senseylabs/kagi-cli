@@ -8,13 +8,13 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	kagi "github.com/senseylabs/kagi-sdk"
 
 	"github.com/senseylabs/kagi-cli/internal/auth"
 	"github.com/senseylabs/kagi-cli/internal/config"
+	"github.com/senseylabs/kagi-cli/internal/httpx"
 )
 
 // Re-export SDK types so existing CLI code doesn't break.
@@ -148,7 +148,12 @@ func NewKagiClient(baseURL, issuerURL string) (*KagiClient, error) {
 				refreshIssuer = issuerURL
 			}
 			deviceFlow := auth.NewDeviceFlow(refreshIssuer, "cli", auth.DefaultScope)
-			endpoints, err := deviceFlow.DiscoverEndpoints()
+			// Bound discovery on this routine refresh path to a single-shot-ish
+			// budget (matches the pre-change behaviour); the interactive `kagi
+			// login` path is where the longer cold-start retry budget applies.
+			discoverCtx, discoverCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			endpoints, err := deviceFlow.DiscoverEndpoints(discoverCtx)
+			discoverCancel()
 			if err != nil {
 				return nil, fmt.Errorf("session expired. Run 'kagi login' to re-authenticate")
 			}
@@ -278,7 +283,7 @@ func (c *KagiClient) doRequest(method, path string) ([]byte, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		if os.IsTimeout(err) || strings.Contains(err.Error(), "deadline exceeded") || strings.Contains(err.Error(), "connection refused") {
+		if httpx.IsRetryable(err) {
 			return nil, fmt.Errorf("could not connect to %s. Check your network or if the API is running", c.baseURL)
 		}
 		return nil, fmt.Errorf("request failed: %w", err)
@@ -364,7 +369,7 @@ func (c *KagiClient) doRequestWithBody(method, path string, payload interface{})
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		if os.IsTimeout(err) || strings.Contains(err.Error(), "deadline exceeded") || strings.Contains(err.Error(), "connection refused") {
+		if httpx.IsRetryable(err) {
 			return nil, fmt.Errorf("could not connect to %s. Check your network or if the API is running", c.baseURL)
 		}
 		return nil, fmt.Errorf("request failed: %w", err)
@@ -520,4 +525,3 @@ func (c *KagiClient) DeleteCertificate(certID string) error {
 	_, err := c.doRequest("DELETE", fmt.Sprintf("/kagi/certificates/%s", certID))
 	return err
 }
-
