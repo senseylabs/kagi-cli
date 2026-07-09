@@ -7,14 +7,23 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
+
+	"github.com/senseylabs/kagi-cli/internal/httpx"
 )
 
 // DefaultScope is the OAuth scope requested by the Kagi CLI.
 // offline_access asks Keycloak for a refresh token bound to the realm's
 // offline-session lifetime rather than the user's SSO session.
 const DefaultScope = "openid offline_access"
+
+// deviceRequestTimeout bounds each single-shot device-flow POST (device
+// authorization and each token poll). It replaces the former http.Client.Timeout
+// (removed so discovery's per-attempt context can own its own timeout) so these
+// requests keep a bound rather than hanging indefinitely.
+const deviceRequestTimeout = 15 * time.Second
 
 // OIDCEndpoints holds the discovered OpenID Connect endpoints.
 type OIDCEndpoints struct {
@@ -56,22 +65,36 @@ type DeviceFlow struct {
 }
 
 // NewDeviceFlow creates a new DeviceFlow instance.
+//
+// The http.Client carries no Timeout: discovery's per-attempt timeout is owned
+// by the context inside httpx.GetWithRetry, and the single-shot POSTs bound
+// themselves via deviceRequestTimeout. Transport is left nil on purpose so
+// http.DefaultTransport keeps honouring ProxyFromEnvironment and HTTP/2 — both
+// were verified innocent while diagnosing the cold-start failure.
 func NewDeviceFlow(issuerURL, clientID, scope string) *DeviceFlow {
 	return &DeviceFlow{
 		issuerURL: issuerURL,
 		clientID:  clientID,
 		scope:     scope,
-		client: &http.Client{
-			Timeout: 15 * time.Second,
-		},
+		client:    &http.Client{},
 	}
 }
 
-// DiscoverEndpoints fetches the OIDC well-known configuration.
-func (d *DeviceFlow) DiscoverEndpoints() (*OIDCEndpoints, error) {
+// DiscoverEndpoints fetches the OIDC well-known configuration, retrying through
+// httpx.GetWithRetry so a transient Keycloak restart (the origin cold-booting
+// with zero ready endpoints) costs a few seconds of waiting rather than a hard
+// failure. The caller owns the overall time budget via ctx.
+func (d *DeviceFlow) DiscoverEndpoints(ctx context.Context) (*OIDCEndpoints, error) {
 	wellKnownURL := d.issuerURL + "/.well-known/openid-configuration"
 
-	resp, err := d.client.Get(wellKnownURL)
+	opts := httpx.DefaultOptions()
+	opts.OnRetry = func(attempt, max int) {
+		// Progress from the 2nd attempt onward only, so the happy path stays
+		// silent. GetWithRetry calls this before each retry.
+		fmt.Fprintf(os.Stderr, "Auth service not responding, retrying (%d/%d)...\n", attempt, max)
+	}
+
+	resp, err := httpx.GetWithRetry(ctx, d.client, wellKnownURL, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch OIDC configuration from %s: %w", wellKnownURL, err)
 	}
@@ -103,7 +126,16 @@ func (d *DeviceFlow) RequestDeviceAuthorization(deviceAuthEndpoint string) (*Dev
 		"scope":     {d.scope},
 	}
 
-	resp, err := d.client.PostForm(deviceAuthEndpoint, data)
+	ctx, cancel := context.WithTimeout(context.Background(), deviceRequestTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, deviceAuthEndpoint, strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create device authorization request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := d.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("device authorization request failed: %w", err)
 	}
@@ -141,13 +173,23 @@ func (d *DeviceFlow) PollForToken(tokenEndpoint, deviceCode string, interval tim
 
 		time.Sleep(interval)
 
-		resp, err := d.client.PostForm(tokenEndpoint, data)
+		reqCtx, cancel := context.WithTimeout(context.Background(), deviceRequestTimeout)
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, tokenEndpoint, strings.NewReader(data.Encode()))
 		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("failed to create token request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+		resp, err := d.client.Do(req)
+		if err != nil {
+			cancel()
 			return nil, fmt.Errorf("token request failed: %w", err)
 		}
 
 		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		cancel()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read token response: %w", err)
 		}
