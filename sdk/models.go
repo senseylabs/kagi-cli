@@ -103,6 +103,31 @@ type CertificateDetail struct {
 	UpdatedAt        string `json:"updatedAt"`
 }
 
+// CertificateFolderItem represents a certificate leaf listed directly inside a
+// certificate folder. It mirrors the SECRETS App leaf: the ID is the stable
+// machine binding used to address the certificate's TLS content, unchanged
+// across renames and folder moves. Served by the /items folder endpoint (the
+// certificates library's children listing carries folders only).
+type CertificateFolderItem struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Slug       string `json:"slug"`
+	Subject    string `json:"subject"`
+	SANs       string `json:"sans"`
+	Thumbprint string `json:"thumbprint"`
+	NotAfter   string `json:"notAfter"`
+	Source     string `json:"source"`
+	CreatedAt  string `json:"createdAt"`
+	UpdatedAt  string `json:"updatedAt"`
+}
+
+// CertificateResolve is the response of resolving a certificate node path to its
+// stable id, the certificate analog of the secrets app-resolve step.
+type CertificateResolve struct {
+	CertificateID string `json:"certificateId"`
+	Name          string `json:"name"`
+}
+
 // CertificateReveal holds decrypted certificate and private key content.
 type CertificateReveal struct {
 	ID                 string `json:"id"`

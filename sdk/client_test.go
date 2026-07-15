@@ -160,6 +160,99 @@ func TestResolveApp_EmptyPath(t *testing.T) {
 	}
 }
 
+func TestListCertificateFolderChildren(t *testing.T) {
+	// The certificates children listing carries child folders only; its Apps
+	// slice is always empty (certificate leaves come from the /items endpoint).
+	children := FolderChildren{
+		Path:    "/websites",
+		Folders: []Folder{{ID: "f1", Name: "Korur", Slug: "korur", Path: "/websites/korur"}},
+	}
+	ts := newTestServer(t, "/kagi/folders/certificates/children/websites", children)
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-token")
+	result, err := client.ListCertificateFolderChildren(context.Background(), "/websites")
+	if err != nil {
+		t.Fatalf("ListCertificateFolderChildren returned error: %v", err)
+	}
+	if len(result.Folders) != 1 || result.Folders[0].Slug != "korur" {
+		t.Errorf("unexpected folders: %+v", result.Folders)
+	}
+}
+
+func TestListCertificatesInFolder(t *testing.T) {
+	certs := []CertificateFolderItem{
+		{ID: "c1", Name: "sensey-io-cloudflare-cert", Slug: "sensey-io-cloudflare-cert", SANs: "*.sensey.io,sensey.io"},
+		{ID: "c2", Name: "kagi-pw-cloudflare-cert", Slug: "kagi-pw-cloudflare-cert"},
+	}
+	ts := newTestServer(t, "/kagi/folders/certificates/items/sensey", certs)
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-token")
+	result, err := client.ListCertificatesInFolder(context.Background(), "/sensey")
+	if err != nil {
+		t.Fatalf("ListCertificatesInFolder returned error: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected 2 certificates, got %d", len(result))
+	}
+	if result[0].ID != "c1" || result[0].Slug != "sensey-io-cloudflare-cert" {
+		t.Errorf("unexpected first certificate: %+v", result[0])
+	}
+}
+
+func TestListCertificatesInFolder_Root(t *testing.T) {
+	// An empty/"/" path lists the certificates root: the wildcard suffix is
+	// empty, so the URL ends at .../items with no trailing segment.
+	ts := newTestServer(t, "/kagi/folders/certificates/items", []CertificateFolderItem{})
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-token")
+	result, err := client.ListCertificatesInFolder(context.Background(), "/")
+	if err != nil {
+		t.Fatalf("ListCertificatesInFolder returned error: %v", err)
+	}
+	if len(result) != 0 {
+		t.Errorf("expected no certificates at root, got %d", len(result))
+	}
+}
+
+func TestResolveCertificate(t *testing.T) {
+	resolved := CertificateResolve{CertificateID: "cert-sensey", Name: "sensey-io-cloudflare-cert"}
+	ts := newTestServer(t, "/kagi/folders/certificates/resolve/sensey/sensey-io-cloudflare-cert", resolved)
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-token")
+	result, err := client.ResolveCertificate(context.Background(), "/sensey/sensey-io-cloudflare-cert")
+	if err != nil {
+		t.Fatalf("ResolveCertificate returned error: %v", err)
+	}
+	if result.CertificateID != "cert-sensey" {
+		t.Errorf("unexpected certificate id: got %q, want %q", result.CertificateID, "cert-sensey")
+	}
+	if result.Name != "sensey-io-cloudflare-cert" {
+		t.Errorf("unexpected certificate name: %q", result.Name)
+	}
+}
+
+func TestResolveCertificate_EmptyPath(t *testing.T) {
+	// A bare "/" does not address a certificate — it must error without a request.
+	reached := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-token")
+	if _, err := client.ResolveCertificate(context.Background(), "/"); err == nil {
+		t.Fatal("expected error for empty path, got nil")
+	}
+	if reached {
+		t.Error("server should not have been reached for an empty path")
+	}
+}
+
 func TestListEnvironments(t *testing.T) {
 	envs := []Environment{
 		{ID: "e1", Name: "Production", Slug: "production"},

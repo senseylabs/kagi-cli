@@ -28,6 +28,8 @@ type CertificateListItem = kagi.CertificateListItem
 type CertificateDetail = kagi.CertificateDetail
 type CertificateReveal = kagi.CertificateReveal
 type CertificateHistory = kagi.CertificateHistory
+type CertificateFolderItem = kagi.CertificateFolderItem
+type CertificateResolve = kagi.CertificateResolve
 
 // APIErrorResponse represents an error response from the API.
 type APIErrorResponse struct {
@@ -227,6 +229,23 @@ func (c *KagiClient) FetchSecrets(appID, envSlug string) (map[string]string, err
 // ListCertificates returns all certificates.
 func (c *KagiClient) ListCertificates() ([]CertificateListItem, error) {
 	return c.sdkClient.ListCertificates(context.Background())
+}
+
+// ListCertificateFolderChildren browses a CERTIFICATES folder path and returns
+// its child folders (certificate leaves come from ListCertificatesInFolder).
+func (c *KagiClient) ListCertificateFolderChildren(path string) (*FolderChildren, error) {
+	return c.sdkClient.ListCertificateFolderChildren(context.Background(), path)
+}
+
+// ListCertificatesInFolder returns the certificates held directly inside the
+// certificate folder addressed by path.
+func (c *KagiClient) ListCertificatesInFolder(path string) ([]CertificateFolderItem, error) {
+	return c.sdkClient.ListCertificatesInFolder(context.Background(), path)
+}
+
+// ResolveCertificate resolves a certificate node path to its stable id and name.
+func (c *KagiClient) ResolveCertificate(path string) (*CertificateResolve, error) {
+	return c.sdkClient.ResolveCertificate(context.Background(), path)
 }
 
 // GetCertificateDetail returns detailed metadata for a certificate.

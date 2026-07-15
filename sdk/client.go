@@ -184,6 +184,48 @@ func (c *Client) RevealCertificate(ctx context.Context, certID string) (*Certifi
 	return &resp.Data, nil
 }
 
+// ListCertificateFolderChildren browses a CERTIFICATES folder path and returns
+// its child folders. Unlike the SECRETS library the children listing carries no
+// leaf items for certificates (its Apps slice is always empty); the certificate
+// leaves under a folder are served by ListCertificatesInFolder. Mirrors the
+// secrets browse, split across two endpoints because the backend serves cert
+// leaves through a dedicated /items route.
+func (c *Client) ListCertificateFolderChildren(ctx context.Context, path string) (*FolderChildren, error) {
+	return c.ListFolderChildren(ctx, LibraryCertificates, path)
+}
+
+// ListCertificatesInFolder returns the certificates held directly inside the
+// certificate folder addressed by path. It hits
+// GET /kagi/folders/certificates/items/{*path}. An empty or "/" path lists the
+// certificates at the certificates root. A large page size is requested so the
+// browse returns every certificate in the folder in one call.
+func (c *Client) ListCertificatesInFolder(ctx context.Context, path string) ([]CertificateFolderItem, error) {
+	var resp APIResponse[[]CertificateFolderItem]
+	if err := c.doGet(ctx, certificateItemsPath(path), &resp); err != nil {
+		return nil, err
+	}
+	return resp.Data, nil
+}
+
+// ResolveCertificate resolves a human-entered certificate node path to the
+// certificate's stable id and display name. The final path segment is the
+// certificate slug; the preceding segments identify its containing folder. It
+// hits GET /kagi/folders/certificates/resolve/{*path}. The returned id is the
+// durable machine binding, valid across renames and folder moves — the
+// certificate analog of the secrets ResolveApp step.
+func (c *Client) ResolveCertificate(ctx context.Context, path string) (*CertificateResolve, error) {
+	trimmed := strings.Trim(path, "/")
+	if trimmed == "" {
+		return nil, fmt.Errorf("kagi: certificate path %q does not address a certificate", path)
+	}
+
+	var resp APIResponse[CertificateResolve]
+	if err := c.doGet(ctx, certificateResolvePath(path), &resp); err != nil {
+		return nil, err
+	}
+	return &resp.Data, nil
+}
+
 // GetCertificateHistory returns audit history for a certificate.
 func (c *Client) GetCertificateHistory(ctx context.Context, certID string) ([]CertificateHistory, error) {
 	var resp APIResponse[[]CertificateHistory]
@@ -207,6 +249,22 @@ var ErrNoOrganizationSelected = fmt.Errorf("no organization selected. Run 'kagi 
 // browses the root (no trailing segment).
 func folderChildrenPath(library KagiLibrary, path string) string {
 	return "/kagi/folders/" + string(library) + "/children" + normalizeFolderPath(path)
+}
+
+// certificateItemsPath builds the folder-addressed certificate-items URL. Like
+// folderChildrenPath the route uses a terminal capturing wildcard, so the path
+// is appended last; an empty/"/" path lists the root. A large page size is
+// requested so the single call returns every certificate in the folder (the
+// endpoint paginates with a small default).
+func certificateItemsPath(path string) string {
+	return "/kagi/folders/certificates/items" + normalizeFolderPath(path) + "?size=500&sort=name"
+}
+
+// certificateResolvePath builds the certificate node-path resolve URL. The route
+// uses a terminal capturing wildcard, so the certificate node path (folder
+// segments then the certificate slug) is appended last.
+func certificateResolvePath(path string) string {
+	return "/kagi/folders/certificates/resolve" + normalizeFolderPath(path)
 }
 
 // normalizeFolderPath collapses a folder path to the canonical wildcard suffix:
