@@ -362,6 +362,7 @@ func runCertGet(cmd *cobra.Command, args []string) error {
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintf(w, "Name:\t%s\n", detail.Name)
+	fmt.Fprintf(w, "ID:\t%s\n", detail.ID)
 	if certPath != "" {
 		fmt.Fprintf(w, "Path:\t%s\n", certPath)
 	}
