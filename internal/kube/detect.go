@@ -42,7 +42,6 @@ func DetectClusterType(issuerURL string) ClusterType {
 	case strings.Contains(host, ".eks.") && strings.HasSuffix(host, ".amazonaws.com"):
 		return ClusterTypeEKS
 	case strings.Contains(host, "container.googleapis.com"),
-		strings.Contains(host, "storage.googleapis.com"),
 		strings.Contains(host, ".gke."):
 		return ClusterTypeGKE
 	case strings.Contains(host, "openshift"):

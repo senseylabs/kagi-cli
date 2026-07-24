@@ -150,7 +150,7 @@ func TestDetectClusterType(t *testing.T) {
 		{name: "AKS region-prefixed prod-aks", issuerURL: "https://westeurope.oic.prod-aks.azure.com/x/y/", want: ClusterTypeAKS},
 		{name: "EKS regional", issuerURL: "https://oidc.eks.eu-west-1.amazonaws.com/id/ABCDEF0123456789", want: ClusterTypeEKS},
 		{name: "GKE container", issuerURL: "https://container.googleapis.com/v1/projects/p/locations/l/clusters/c", want: ClusterTypeGKE},
-		{name: "GKE storage bucket issuer", issuerURL: "https://storage.googleapis.com/my-oidc-bucket", want: ClusterTypeGKE},
+		{name: "GCS-only bucket issuer is GENERIC", issuerURL: "https://storage.googleapis.com/my-oidc-bucket", want: ClusterTypeGeneric},
 		{name: "GKE gke host token", issuerURL: "https://oidc.prod.gke.example.com/cluster", want: ClusterTypeGKE},
 		{name: "OpenShift host", issuerURL: "https://oauth-openshift.apps.rosa.example.com", want: ClusterTypeOpenShift},
 		{name: "K3s host", issuerURL: "https://k3s.example.internal:6443", want: ClusterTypeK3s},
