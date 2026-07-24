@@ -6,7 +6,7 @@ A CLI tool for managing secrets in Kagi. Supports Keycloak Device Authorization 
 
 | Method | Platform | Command |
 |---|---|---|
-| Homebrew | macOS, Linux | `brew install senseylabs/tap/kagi` |
+| Homebrew | macOS, Linux | `brew install senseylabs/tap/kagi-cli` |
 | curl (install script) | macOS, Linux | `curl -sSf https://get.kagi.pw \| sh` |
 | Scoop | Windows | coming soon |
 | winget | Windows | coming soon |
@@ -17,7 +17,7 @@ A CLI tool for managing secrets in Kagi. Supports Keycloak Device Authorization 
 
 ```bash
 brew tap senseylabs/tap
-brew install kagi
+brew install kagi-cli
 ```
 
 ### curl (macOS / Linux)

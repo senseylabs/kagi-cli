@@ -45,8 +45,7 @@ nfpms:
       - apk
 
 brews:
-  - name: kagi
-    repository:
+  - repository:
       owner: senseylabs
       name: homebrew-tap
       token: "{{ .Env.GITHUB_TOKEN }}"
