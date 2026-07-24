@@ -35,6 +35,11 @@ type applyIssuer struct {
 	// other non-empty value is treated as a path to a JWKS file, and an empty
 	// value (omitted or null) registers no static JWKS (public cluster).
 	StaticJwks string `yaml:"staticJwks"`
+	// Type is the cluster platform (AKS/EKS/GKE/OPENSHIFT/K3S/GENERIC). Optional:
+	// an empty/omitted value inherits an existing issuer's current type on update
+	// (never clobbers it back to GENERIC) and defaults to GENERIC server-side on
+	// create.
+	Type string `yaml:"type"`
 }
 
 type applyBinding struct {
@@ -101,8 +106,11 @@ func runClusterApply(cmd *cobra.Command, args []string) error {
 	}
 
 	// Resolve the issuer's identity (URL + display name). The URL is the
-	// idempotency key, so it is resolved before we look for an existing issuer.
-	issuerURL, name, err := resolveClusterIssuerIdentity(spec.Issuer.URL, spec.Issuer.Name, clusterApplyContext)
+	// idempotency key, so it is resolved before we look for an existing issuer. The
+	// detected type is intentionally discarded here: apply resolves the type
+	// separately (file value, else inherit existing, else backend default) rather
+	// than auto-detecting.
+	issuerURL, name, _, err := resolveClusterIssuerIdentity(spec.Issuer.URL, spec.Issuer.Name, clusterApplyContext, "")
 	if err != nil {
 		return err
 	}
@@ -112,6 +120,21 @@ func runClusterApply(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to list cluster issuers: %w", err)
 	}
 	existingIssuer := matchIssuerByURL(issuers, issuerURL)
+
+	// Resolve the desired platform type: an explicit file value wins (validated);
+	// otherwise inherit an existing issuer's current type so re-running apply never
+	// resets a hand-set type back to GENERIC; on create, leave it empty so the
+	// backend default (GENERIC) applies.
+	desiredType := ""
+	if strings.TrimSpace(spec.Issuer.Type) != "" {
+		parsed, terr := parseClusterType(spec.Issuer.Type)
+		if terr != nil {
+			return terr
+		}
+		desiredType = string(parsed)
+	} else if existingIssuer != nil {
+		desiredType = existingIssuer.Type
+	}
 
 	// Map the file's staticJwks field to a JWKS source: "auto" detects it via
 	// kubectl, any other non-empty value is a file path, empty means public.
@@ -145,15 +168,15 @@ func runClusterApply(cmd *cobra.Command, args []string) error {
 	}
 
 	issuer := existingIssuer
-	switch decideIssuerAction(existingIssuer, name, desiredJwks, desiredEnabled) {
+	switch decideIssuerAction(existingIssuer, name, desiredJwks, desiredEnabled, desiredType) {
 	case issuerActionCreate:
-		issuer, err = vc.CreateClusterIssuer(issuerURL, name, desiredJwks)
+		issuer, err = vc.CreateClusterIssuer(issuerURL, name, desiredJwks, desiredType)
 		if err != nil {
 			return fmt.Errorf("failed to register cluster issuer %q: %w", issuerURL, err)
 		}
 		fmt.Printf("issuer %q: created (%s)\n", issuer.DisplayName, issuer.IssuerURL)
 	case issuerActionUpdate:
-		issuer, err = vc.UpdateClusterIssuer(existingIssuer.ID, name, desiredJwks, desiredEnabled)
+		issuer, err = vc.UpdateClusterIssuer(existingIssuer.ID, name, desiredJwks, desiredEnabled, desiredType)
 		if err != nil {
 			return fmt.Errorf("failed to update cluster issuer %q: %w", name, err)
 		}

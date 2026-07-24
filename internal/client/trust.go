@@ -29,8 +29,12 @@ type ClusterIssuer struct {
 	DisplayName string `json:"displayName"`
 	StaticJwks  string `json:"staticJwks"`
 	Enabled     bool   `json:"enabled"`
-	CreatedAt   string `json:"createdAt"`
-	UpdatedAt   string `json:"updatedAt"`
+	// Type is the cluster platform (AKS/EKS/GKE/OPENSHIFT/K3S/GENERIC).
+	// Descriptive metadata only — always present on responses from a migrated
+	// backend (the column is NOT NULL DEFAULT 'GENERIC').
+	Type      string `json:"type"`
+	CreatedAt string `json:"createdAt"`
+	UpdatedAt string `json:"updatedAt"`
 }
 
 // BindingScope grants a workload binding access to one app environment. AppID is
@@ -79,18 +83,22 @@ func (c *KagiClient) ListClusterIssuers() ([]ClusterIssuer, error) {
 
 // CreateClusterIssuer registers a cluster OIDC issuer. staticJwks is optional —
 // pass an empty string for a public cluster whose JWKS Kagi can fetch itself;
-// pass the raw JWKS JSON for a private cluster.
-func (c *KagiClient) CreateClusterIssuer(issuerURL, displayName, staticJwks string) (*ClusterIssuer, error) {
+// pass the raw JWKS JSON for a private cluster. clusterType is optional too — an
+// empty string omits the field entirely, letting the backend default it to
+// GENERIC (the field is not required on create).
+func (c *KagiClient) CreateClusterIssuer(issuerURL, displayName, staticJwks, clusterType string) (*ClusterIssuer, error) {
 	type createRequest struct {
 		IssuerURL   string `json:"issuerUrl"`
 		DisplayName string `json:"displayName"`
 		StaticJwks  string `json:"staticJwks,omitempty"`
+		Type        string `json:"type,omitempty"`
 	}
 
 	payload := createRequest{
 		IssuerURL:   issuerURL,
 		DisplayName: displayName,
 		StaticJwks:  staticJwks,
+		Type:        clusterType,
 	}
 
 	body, err := c.doRequestWithBody("POST", clusterIssuersPath, payload)
@@ -105,21 +113,26 @@ func (c *KagiClient) CreateClusterIssuer(issuerURL, displayName, staticJwks stri
 	return &resp.Data, nil
 }
 
-// UpdateClusterIssuer replaces a cluster issuer's display name, pinned JWKS, and
-// enabled flag. Full update: every field is applied. staticJwks is optional — an
-// empty string clears any pinned JWKS and reverts the issuer to OIDC discovery.
-// The issuer URL is immutable and is therefore not part of the update.
-func (c *KagiClient) UpdateClusterIssuer(clusterIssuerID, displayName, staticJwks string, enabled bool) (*ClusterIssuer, error) {
+// UpdateClusterIssuer replaces a cluster issuer's display name, pinned JWKS,
+// enabled flag, and platform type. Full update: every field is applied.
+// staticJwks is optional — an empty string clears any pinned JWKS and reverts
+// the issuer to OIDC discovery. clusterType is required by the backend on update
+// and is therefore always sent (no omitempty); callers pass the issuer's current
+// type through when they are not changing it. The issuer URL is immutable and is
+// therefore not part of the update.
+func (c *KagiClient) UpdateClusterIssuer(clusterIssuerID, displayName, staticJwks string, enabled bool, clusterType string) (*ClusterIssuer, error) {
 	type updateRequest struct {
 		DisplayName string `json:"displayName"`
 		StaticJwks  string `json:"staticJwks,omitempty"`
 		Enabled     bool   `json:"enabled"`
+		Type        string `json:"type"`
 	}
 
 	payload := updateRequest{
 		DisplayName: displayName,
 		StaticJwks:  staticJwks,
 		Enabled:     enabled,
+		Type:        clusterType,
 	}
 
 	body, err := c.doRequestWithBody("PUT", clusterIssuersPath+"/"+url.PathEscape(clusterIssuerID), payload)

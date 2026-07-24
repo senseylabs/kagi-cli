@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/senseylabs/kagi-cli/internal/client"
+	"github.com/senseylabs/kagi-cli/internal/kube"
 )
 
 func issuers(items ...client.ClusterIssuer) []client.ClusterIssuer {
@@ -57,6 +58,74 @@ func TestMatchClusterIssuer(t *testing.T) {
 	}
 }
 
+// TestParseClusterType covers case-insensitive acceptance of the six known
+// platforms and rejection of anything else with an actionable message.
+func TestParseClusterType(t *testing.T) {
+	valid := map[string]kube.ClusterType{
+		"AKS":       kube.ClusterTypeAKS,
+		"eks":       kube.ClusterTypeEKS,
+		"Gke":       kube.ClusterTypeGKE,
+		"openshift": kube.ClusterTypeOpenShift,
+		"  k3s  ":   kube.ClusterTypeK3s,
+		"GENERIC":   kube.ClusterTypeGeneric,
+	}
+	for raw, want := range valid {
+		got, err := parseClusterType(raw)
+		if err != nil {
+			t.Fatalf("parseClusterType(%q) unexpected error: %v", raw, err)
+		}
+		if got != want {
+			t.Fatalf("parseClusterType(%q) = %q, want %q", raw, got, want)
+		}
+	}
+
+	for _, raw := range []string{"DOCKER_DESKTOP", "kind", "", "aksx"} {
+		_, err := parseClusterType(raw)
+		if err == nil {
+			t.Fatalf("parseClusterType(%q) expected an error", raw)
+		}
+		if !strings.Contains(err.Error(), "Valid values") {
+			t.Fatalf("parseClusterType(%q) error should list valid values: %v", raw, err)
+		}
+	}
+}
+
+// TestDecideIssuerAction covers the reconcile verdict including the new type
+// field: a type-only difference must force an update, and a full match (type
+// included) must report unchanged.
+func TestDecideIssuerAction(t *testing.T) {
+	existing := &client.ClusterIssuer{
+		DisplayName: "prod",
+		StaticJwks:  "",
+		Enabled:     true,
+		Type:        "EKS",
+	}
+
+	tests := []struct {
+		name     string
+		existing *client.ClusterIssuer
+		dName    string
+		dJwks    string
+		dEnabled bool
+		dType    string
+		want     issuerAction
+	}{
+		{name: "nil existing -> create", existing: nil, dName: "prod", dEnabled: true, dType: "EKS", want: issuerActionCreate},
+		{name: "all match -> unchanged", existing: existing, dName: "prod", dJwks: "", dEnabled: true, dType: "EKS", want: issuerActionUnchanged},
+		{name: "type differs -> update", existing: existing, dName: "prod", dJwks: "", dEnabled: true, dType: "AKS", want: issuerActionUpdate},
+		{name: "name differs -> update", existing: existing, dName: "prod-2", dJwks: "", dEnabled: true, dType: "EKS", want: issuerActionUpdate},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := decideIssuerAction(tt.existing, tt.dName, tt.dJwks, tt.dEnabled, tt.dType)
+			if got != tt.want {
+				t.Fatalf("decideIssuerAction = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseApplyFile_Valid(t *testing.T) {
 	data := []byte(`
 issuer:
@@ -99,6 +168,50 @@ bindings:
 	}
 	if spec.Bindings[1].Scopes[0].App != "/village/lancer" || spec.Bindings[1].Scopes[0].Env != "staging" {
 		t.Fatalf("binding 1 scope 0 = %+v", spec.Bindings[1].Scopes[0])
+	}
+}
+
+func TestParseApplyFile_TypeKey(t *testing.T) {
+	data := []byte(`
+issuer:
+  url: https://oidc.eks.eu-west-1.amazonaws.com/id/x
+  name: prod
+  type: EKS
+bindings:
+  - namespace: app
+    serviceAccount: api
+    scopes:
+      - app: /village/kaizen
+        env: prod
+`)
+
+	spec, err := parseApplyFile(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if spec.Issuer.Type != "EKS" {
+		t.Fatalf("issuer type = %q, want EKS", spec.Issuer.Type)
+	}
+}
+
+func TestParseApplyFile_TypeKeyOmittedIsEmpty(t *testing.T) {
+	data := []byte(`
+issuer:
+  url: https://oidc.example/prod
+bindings:
+  - namespace: app
+    serviceAccount: api
+    scopes:
+      - app: /village/kaizen
+        env: prod
+`)
+
+	spec, err := parseApplyFile(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if spec.Issuer.Type != "" {
+		t.Fatalf("issuer type = %q, want empty", spec.Issuer.Type)
 	}
 }
 
