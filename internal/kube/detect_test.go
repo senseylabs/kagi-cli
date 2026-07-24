@@ -136,6 +136,42 @@ func TestDetectJWKS_Success(t *testing.T) {
 	}
 }
 
+// TestDetectClusterType covers one row per heuristic entry in the spec's host-
+// substring table, plus the unrecognized-host GENERIC fallback and a couple of
+// edge inputs (bare host, empty). Detection is on the URL host only.
+func TestDetectClusterType(t *testing.T) {
+	tests := []struct {
+		name      string
+		issuerURL string
+		want      ClusterType
+	}{
+		{name: "AKS azmk8s", issuerURL: "https://mycluster-dns-abc123.hcp.westeurope.azmk8s.io", want: ClusterTypeAKS},
+		{name: "AKS oidc prod-aks", issuerURL: "https://oic.prod-aks.azure.com/tenant/guid/", want: ClusterTypeAKS},
+		{name: "AKS region-prefixed prod-aks", issuerURL: "https://westeurope.oic.prod-aks.azure.com/x/y/", want: ClusterTypeAKS},
+		{name: "EKS regional", issuerURL: "https://oidc.eks.eu-west-1.amazonaws.com/id/ABCDEF0123456789", want: ClusterTypeEKS},
+		{name: "GKE container", issuerURL: "https://container.googleapis.com/v1/projects/p/locations/l/clusters/c", want: ClusterTypeGKE},
+		{name: "GKE storage bucket issuer", issuerURL: "https://storage.googleapis.com/my-oidc-bucket", want: ClusterTypeGKE},
+		{name: "GKE gke host token", issuerURL: "https://oidc.prod.gke.example.com/cluster", want: ClusterTypeGKE},
+		{name: "OpenShift host", issuerURL: "https://oauth-openshift.apps.rosa.example.com", want: ClusterTypeOpenShift},
+		{name: "K3s host", issuerURL: "https://k3s.example.internal:6443", want: ClusterTypeK3s},
+		{name: "Rancher host", issuerURL: "https://rancher.example.com/k8s/clusters/c-abc", want: ClusterTypeK3s},
+		{name: "unknown host falls back to GENERIC", issuerURL: "https://oidc.example.com/cluster", want: ClusterTypeGeneric},
+		{name: "in-cluster default svc is GENERIC", issuerURL: "https://kubernetes.default.svc", want: ClusterTypeGeneric},
+		{name: "bare host without scheme still matches", issuerURL: "oidc.eks.us-east-1.amazonaws.com", want: ClusterTypeEKS},
+		{name: "empty is GENERIC", issuerURL: "", want: ClusterTypeGeneric},
+		{name: "case-insensitive host", issuerURL: "https://OIDC.EKS.EU-WEST-1.AMAZONAWS.COM/id/x", want: ClusterTypeEKS},
+		{name: "EKS token without amazonaws suffix is GENERIC", issuerURL: "https://oidc.eks.internal.example.com/id/x", want: ClusterTypeGeneric},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := DetectClusterType(tt.issuerURL); got != tt.want {
+				t.Fatalf("DetectClusterType(%q) = %q, want %q", tt.issuerURL, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDetectJWKS_InvalidJSON(t *testing.T) {
 	withRunner(t, func(args ...string) ([]byte, error) {
 		return []byte("Error from server (Forbidden)"), nil

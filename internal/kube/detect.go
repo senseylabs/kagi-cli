@@ -9,8 +9,62 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os/exec"
+	"strings"
 )
+
+// ClusterType is the platform a cluster issuer runs on. It mirrors the backend's
+// ClusterIssuerType enum and is descriptive metadata only — it never gates or
+// alters which JWTs are trusted.
+type ClusterType string
+
+const (
+	ClusterTypeAKS       ClusterType = "AKS"
+	ClusterTypeEKS       ClusterType = "EKS"
+	ClusterTypeGKE       ClusterType = "GKE"
+	ClusterTypeOpenShift ClusterType = "OPENSHIFT"
+	ClusterTypeK3s       ClusterType = "K3S"
+	ClusterTypeGeneric   ClusterType = "GENERIC"
+)
+
+// DetectClusterType infers the platform from the issuer URL's host. Detection is
+// host-substring based and best-effort: an unrecognized host (or an unparseable
+// URL) returns ClusterTypeGeneric, never an error, so it never blocks
+// registration. Matching is case-insensitive and checked in the order below,
+// first match wins. Only the issuer URL host drives detection — kubeconfig
+// context names are free-form aliases and carry no reliable platform signal.
+func DetectClusterType(issuerURL string) ClusterType {
+	host := issuerURLHost(issuerURL)
+	switch {
+	case strings.Contains(host, ".azmk8s.io"), strings.Contains(host, "prod-aks.azure.com"):
+		return ClusterTypeAKS
+	case strings.Contains(host, ".eks.") && strings.HasSuffix(host, ".amazonaws.com"):
+		return ClusterTypeEKS
+	case strings.Contains(host, "container.googleapis.com"),
+		strings.Contains(host, "storage.googleapis.com"),
+		strings.Contains(host, ".gke."):
+		return ClusterTypeGKE
+	case strings.Contains(host, "openshift"):
+		return ClusterTypeOpenShift
+	case strings.Contains(host, "k3s"), strings.Contains(host, "rancher"):
+		return ClusterTypeK3s
+	default:
+		return ClusterTypeGeneric
+	}
+}
+
+// issuerURLHost extracts the lower-cased host from an issuer URL. If the URL does
+// not parse into a host (e.g. a bare host string with no scheme), it falls back
+// to matching against the whole lower-cased input so detection still works on
+// loosely-formed issuer values.
+func issuerURLHost(issuerURL string) string {
+	trimmed := strings.TrimSpace(issuerURL)
+	if parsed, err := url.Parse(trimmed); err == nil && parsed.Host != "" {
+		return strings.ToLower(parsed.Host)
+	}
+	return strings.ToLower(trimmed)
+}
 
 // Runner executes kubectl with the given arguments and returns its stdout. It is
 // a package var so tests can substitute a fake — the real implementation shells

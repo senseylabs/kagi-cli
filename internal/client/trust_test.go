@@ -122,12 +122,28 @@ func TestCreateClusterIssuer_Request(t *testing.T) {
 	ts := newTrustTestServer(t, &got, map[string]any{"id": testID})
 	defer ts.Close()
 
-	_, err := newTrustTestClient(ts).CreateClusterIssuer("https://oidc.example/prod", "prod", `{"keys":[]}`)
+	_, err := newTrustTestClient(ts).CreateClusterIssuer("https://oidc.example/prod", "prod", `{"keys":[]}`, "EKS")
 	if err != nil {
 		t.Fatalf("CreateClusterIssuer: %v", err)
 	}
 	assertRequest(t, got, http.MethodPost, clusterIssuersBase)
-	assertBodyKeys(t, got.body, "issuerUrl", "displayName", "staticJwks")
+	assertBodyKeys(t, got.body, "issuerUrl", "displayName", "staticJwks", "type")
+}
+
+// TestCreateClusterIssuer_OmitsEmptyType asserts an empty type is omitted from
+// the create body entirely, so the backend applies its GENERIC default and old
+// clients stay wire-compatible.
+func TestCreateClusterIssuer_OmitsEmptyType(t *testing.T) {
+	var got capturedRequest
+	ts := newTrustTestServer(t, &got, map[string]any{"id": testID})
+	defer ts.Close()
+
+	_, err := newTrustTestClient(ts).CreateClusterIssuer("https://oidc.example/prod", "prod", "", "")
+	if err != nil {
+		t.Fatalf("CreateClusterIssuer: %v", err)
+	}
+	assertBodyKeys(t, got.body, "issuerUrl", "displayName")
+	assertNoBodyField(t, got.body, "type")
 }
 
 func TestUpdateClusterIssuer_Request(t *testing.T) {
@@ -135,12 +151,12 @@ func TestUpdateClusterIssuer_Request(t *testing.T) {
 	ts := newTrustTestServer(t, &got, map[string]any{"id": testID})
 	defer ts.Close()
 
-	_, err := newTrustTestClient(ts).UpdateClusterIssuer(testID, "prod", `{"keys":[]}`, true)
+	_, err := newTrustTestClient(ts).UpdateClusterIssuer(testID, "prod", `{"keys":[]}`, true, "AKS")
 	if err != nil {
 		t.Fatalf("UpdateClusterIssuer: %v", err)
 	}
 	assertRequest(t, got, http.MethodPut, clusterIssuersBase+"/"+testID)
-	assertBodyKeys(t, got.body, "displayName", "staticJwks", "enabled")
+	assertBodyKeys(t, got.body, "displayName", "staticJwks", "enabled", "type")
 	assertNoBodyField(t, got.body, "id")
 	assertNoBodyField(t, got.body, "clusterIssuerId")
 }
