@@ -4,10 +4,50 @@ A CLI tool for managing secrets in Kagi. Supports Keycloak Device Authorization 
 
 ## Installation
 
+| Method | Platform | Command |
+|---|---|---|
+| Homebrew | macOS, Linux | `brew install senseylabs/tap/kagi-cli` |
+| curl (install script) | macOS, Linux | `curl -sSf https://get.kagi.pw \| sh` |
+| Scoop | Windows | coming soon |
+| winget | Windows | coming soon |
+| Chocolatey | Windows | coming soon |
+| Direct download | macOS, Linux, Windows | [GitHub Releases](https://github.com/senseylabs/kagi-cli/releases) |
+
+### Homebrew
+
 ```bash
 brew tap senseylabs/tap
 brew install kagi-cli
 ```
+
+### curl (macOS / Linux)
+
+```bash
+curl -sSf https://get.kagi.pw | sh
+```
+
+This downloads the latest release for your OS/architecture, verifies its
+checksum, and installs `kagi` to `/usr/local/bin` (falling back to
+`~/.local/bin` if that isn't writable). See `install.sh` in this repo.
+
+### Windows
+
+Scoop, winget, and Chocolatey packages are not published yet (coming soon).
+Until then, install with PowerShell:
+
+```powershell
+iwr https://get.kagi.pw/install.ps1 -useb | iex
+```
+
+or download the `windows_amd64`/`windows_arm64` `.zip` directly from the
+[releases page](https://github.com/senseylabs/kagi-cli/releases) and put
+`kagi.exe` on your `PATH`.
+
+### Direct download
+
+Prebuilt binaries for macOS, Linux, and Windows (amd64 + arm64), plus
+`.deb`/`.rpm`/`.apk` packages for Linux, are attached to every
+[GitHub release](https://github.com/senseylabs/kagi-cli/releases).
 
 ## Usage
 

@@ -3,25 +3,46 @@ version: 2
 project_name: kagi-cli
 
 builds:
-  - main: .
+  - id: kagi
+    main: .
     binary: kagi
     env:
       - CGO_ENABLED=0
     goos:
       - darwin
       - linux
+      - windows
     goarch:
       - amd64
       - arm64
-    ignore:
-      - goos: linux
-        goarch: arm64
     ldflags:
       - -s -w -X main.version={{.Version}}
 
 archives:
-  - format: tar.gz
+  - formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+# Linux native packages (.deb / .rpm / .apk), amd64 + arm64.
+# nfpm only produces packages for linux artifacts from the referenced build,
+# so darwin/windows archives are unaffected.
+nfpms:
+  - id: kagi
+    package_name: kagi
+    ids:
+      - kagi
+    vendor: Sensey Labs
+    maintainer: "Sensey Labs <devs@sensey.io>"
+    description: "Kagi CLI — secrets management for Sensey"
+    homepage: "https://github.com/senseylabs/kagi-cli"
+    license: MIT
+    bindir: /usr/bin
+    formats:
+      - deb
+      - rpm
+      - apk
 
 brews:
   - repository:
@@ -36,6 +57,90 @@ brews:
       bin.install "kagi"
     test: |
       system "#{bin}/kagi", "--version"
+
+# ---------------------------------------------------------------------------
+# The following publishers target repos/accounts that do NOT exist yet.
+# Leaving them active would break `goreleaser release` (auth/repo-not-found).
+# Uncomment each block only once its target repo/secret has been created.
+# ---------------------------------------------------------------------------
+
+# TODO(distribution): enable once senseylabs/scoop-bucket repo exists
+# scoops:
+#   - repository:
+#       owner: senseylabs
+#       name: scoop-bucket
+#       token: "{{ .Env.GITHUB_TOKEN }}"
+#     directory: bucket
+#     homepage: "https://github.com/senseylabs/kagi-cli"
+#     description: "Kagi CLI — secrets management for Sensey"
+#     license: MIT
+
+# TODO(distribution): enable once a winget-pkgs fork + WINGET_GITHUB_TOKEN secret exist
+# winget:
+#   - name: kagi
+#     publisher: SenseyLabs
+#     publisher_url: "https://github.com/senseylabs"
+#     publisher_support_url: "https://github.com/senseylabs/kagi-cli/issues"
+#     license: MIT
+#     license_url: "https://github.com/senseylabs/kagi-cli/blob/main/LICENSE"
+#     homepage: "https://github.com/senseylabs/kagi-cli"
+#     short_description: "Kagi CLI — secrets management for Sensey"
+#     path: "manifests/s/SenseyLabs/kagi/{{ .Version }}"
+#     repository:
+#       owner: senseylabs
+#       name: winget-pkgs
+#       branch: "kagi-{{ .Version }}"
+#       token: "{{ .Env.WINGET_GITHUB_TOKEN }}"
+#       pull_request:
+#         enabled: true
+#         base:
+#           owner: microsoft
+#           name: winget-pkgs
+#           branch: master
+
+# TODO(distribution): enable once a Chocolatey account + CHOCOLATEY_API_KEY secret exist
+# chocolateys:
+#   - name: kagi
+#     title: Kagi CLI
+#     authors: Sensey Labs
+#     project_url: "https://github.com/senseylabs/kagi-cli"
+#     url_template: "https://github.com/senseylabs/kagi-cli/releases/download/{{ .Tag }}/{{ .ArtifactName }}"
+#     license_url: "https://github.com/senseylabs/kagi-cli/blob/main/LICENSE"
+#     require_license_acceptance: false
+#     description: "Kagi CLI — secrets management for Sensey"
+#     summary: "Kagi CLI — secrets management for Sensey"
+#     api_key: "{{ .Env.CHOCOLATEY_API_KEY }}"
+#     source_repo: "https://push.chocolatey.org/"
+#     skip_publish: false
+#     goamd64: v1
+
+# TODO(distribution): enable once an AUR account + AUR_KEY (SSH deploy key) exist
+# aurs:
+#   - name: kagi-bin
+#     ids:
+#       - kagi
+#     homepage: "https://github.com/senseylabs/kagi-cli"
+#     description: "Kagi CLI — secrets management for Sensey"
+#     maintainers:
+#       - "Sensey Labs <devs@sensey.io>"
+#     license: MIT
+#     private_key: "{{ .Env.AUR_KEY }}"
+#     git_url: "ssh://aur@aur.archlinux.org/kagi-bin.git"
+#     package: |-
+#       install -Dm755 "./kagi" "${pkgdir}/usr/bin/kagi"
+#       install -Dm644 "./LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+
+# TODO(distribution): enable once a Snap Store account + SNAPCRAFT_STORE_CREDENTIALS secret exist
+# snapcrafts:
+#   - name: kagi
+#     summary: "Kagi CLI — secrets management for Sensey"
+#     description: "Kagi CLI — secrets management for Sensey"
+#     grade: stable
+#     confinement: strict
+#     publish: true
+#     apps:
+#       kagi:
+#         command: kagi
 
 changelog:
   sort: asc
