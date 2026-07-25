@@ -58,14 +58,17 @@ jobs:
 
       # golangci-lint v2 to match .golangci.yml (version: "2"). The v6 action
       # installs the v1 line, which rejects the v2 config; v7+ installs v2.
+      # The pinned version must be built with Go >= the module's go directive
+      # (go 1.25.3) — golangci-lint refuses to run when its own build Go is older
+      # (v2.1.6 is built with go1.24 and fails). v2.12.x is built with go1.26.
       - uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.1.6
+          version: v2.12.2
 
       # The sdk is a separate module; golangci-lint won't cross module
       # boundaries, so lint it from within sdk/. The root .golangci.yml is
       # discovered by walking up the tree, so the same config applies.
       - uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.1.6
+          version: v2.12.2
           working-directory: sdk
