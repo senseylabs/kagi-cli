@@ -50,6 +50,21 @@ func TestPickFilterRenumbers(t *testing.T) {
 	}
 }
 
+func TestPickBlankClearsFilter(t *testing.T) {
+	// Filter "app" narrows to [app-web, app-db]; a blank line clears the filter
+	// back to the full folders-first list [alpha, beta, app-web, app-db, widget];
+	// "1" then selects alpha (the first folder), proving the list was restored.
+	u, _, _ := newTestUI(t, 80, "app\n\n1\n")
+
+	res, err := u.Pick("/shared", sampleItems(), PickOptions{})
+	if err != nil {
+		t.Fatalf("Pick: %v", err)
+	}
+	if res.Kind != PickSelected || res.Item.Label != "alpha" {
+		t.Fatalf("got (%v,%q), want (PickSelected,alpha) — blank should clear the filter", res.Kind, res.Item.Label)
+	}
+}
+
 func TestPickNumberSelectsFolderFirst(t *testing.T) {
 	// With no filter, item 1 is the first folder after folders-first ordering.
 	u, _, _ := newTestUI(t, 80, "1\n")

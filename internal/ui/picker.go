@@ -57,7 +57,7 @@ type PickOptions struct {
 //   - a number selects that item from the currently shown (filtered) list;
 //   - "q" quits (PickQuit); EOF/Ctrl-D quits too;
 //   - ".." goes up a level (PickGoUp) when AllowUp is set;
-//   - an empty line re-renders unchanged;
+//   - an empty line clears an active filter (back to the full list);
 //   - any other text becomes a case-insensitive substring filter (matched
 //     against Label and Secondary), narrowing and renumbering the list.
 //
@@ -69,7 +69,7 @@ func (u *UI) Pick(title string, items []PickItem, opts PickOptions) (PickResult,
 
 	for {
 		filtered := filterPickItems(ordered, filter)
-		u.renderPickList(title, filtered)
+		u.renderPickList(title, filtered, opts.AllowUp, filter != "")
 
 		line, err := u.in.ReadString('\n')
 		if err != nil && err != io.EOF {
@@ -79,10 +79,12 @@ func (u *UI) Pick(title string, items []PickItem, opts PickOptions) (PickResult,
 
 		if input == "" {
 			// A clean EOF with no pending data is a quit (Ctrl-D on a TTY, end of
-			// a pipe otherwise). An empty line just re-renders.
+			// a pipe otherwise). An empty line clears an active filter (back to the
+			// full list); with no filter set it simply re-renders.
 			if err == io.EOF {
 				return PickResult{Kind: PickQuit}, nil
 			}
+			filter = ""
 			continue
 		}
 
@@ -144,7 +146,7 @@ func filterPickItems(items []PickItem, filter string) []PickItem {
 // renderPickList writes the title, the numbered (already filtered/ordered) rows,
 // and the "filter> " prompt to stderr. The prompt has no trailing newline so the
 // user's input sits on the same line.
-func (u *UI) renderPickList(title string, filtered []PickItem) {
+func (u *UI) renderPickList(title string, filtered []PickItem, allowUp, filterActive bool) {
 	if title != "" {
 		fmt.Fprintln(u.err, title)
 	}
@@ -154,6 +156,15 @@ func (u *UI) renderPickList(title string, filtered []PickItem) {
 	for i, it := range filtered {
 		u.renderPickRow(i+1, it)
 	}
+	hint := "[#] open · type to filter"
+	if filterActive {
+		hint += " · blank clears filter"
+	}
+	if allowUp {
+		hint += " · .. up"
+	}
+	hint += " · q quit"
+	fmt.Fprintln(u.err, "  "+hint)
 	fmt.Fprint(u.err, "filter> ")
 }
 
