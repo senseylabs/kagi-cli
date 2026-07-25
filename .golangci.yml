@@ -1,0 +1,53 @@
+# golangci-lint configuration.
+#
+# First pass over an existing codebase: the core correctness/security linters are
+# enabled, but a few of the noisiest checks are relaxed or excluded (with a note)
+# so CI can actually go green. Tighten these as the codebase is cleaned up.
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - revive
+    - ineffassign
+    - unused
+    - misspell
+    - gosec
+    - gofmt
+    - goimports
+
+linters-settings:
+  goimports:
+    # Group our own module imports separately.
+    local-prefixes: github.com/senseylabs/kagi-cli
+  misspell:
+    locale: US
+  revive:
+    # Keep revive advisory-only for the first pass; it is style-heavy and would
+    # otherwise drown out the correctness linters. Raise severity later.
+    severity: warning
+    rules:
+      - name: exported
+        disabled: true # too noisy on an existing codebase; re-enable later.
+
+issues:
+  # Show all findings rather than the default per-linter/per-path caps.
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    # Test files: relax security and error-check noise that is fine in tests.
+    - path: _test\.go
+      linters:
+        - gosec
+        - errcheck
+    # Unhandled errors on Close/Flush/Write-to-stderr are common and low-risk;
+    # errcheck already covers the important call sites elsewhere.
+    - text: "Error return value of .((os\\.)?std(out|err)\\.Write|.*\\.Close|.*\\.Flush). is not checked"
+      linters:
+        - errcheck

@@ -9,7 +9,33 @@ permissions:
   contents: write
 
 jobs:
+  # Gate: a bad tag must not ship to brew/deb/rpm/apk untested. Vet + test both
+  # modules (root and sdk) before goreleaser runs.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: vet + test (root module)
+        run: |
+          go vet ./...
+          go test -race ./...
+
+      - name: vet + test (sdk module)
+        run: |
+          cd sdk
+          go vet ./...
+          go test -race ./...
+
   release:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -25,6 +25,68 @@ const DefaultScope = "openid offline_access"
 // requests keep a bound rather than hanging indefinitely.
 const deviceRequestTimeout = 15 * time.Second
 
+// maxPollInterval caps how large the poll interval may grow. RFC 8628 tells the
+// client to lengthen the interval on every slow_down response, but a server that
+// keeps returning slow_down would otherwise push the interval up without bound
+// and eventually poll only once per expiry window. Capping keeps polling
+// responsive while still backing off.
+const maxPollInterval = 30 * time.Second
+
+// nextSlowDownInterval grows the poll interval by 5 seconds (RFC 8628) in
+// response to a slow_down, clamped to maxPollInterval so it can never grow
+// without bound.
+func nextSlowDownInterval(interval time.Duration) time.Duration {
+	interval += 5 * time.Second
+	if interval > maxPollInterval {
+		interval = maxPollInterval
+	}
+	return interval
+}
+
+// maxPollTransientErrors bounds how many consecutive transient network failures
+// PollForToken tolerates before giving up. The expiry deadline already bounds
+// total time; this stops a hard-down endpoint from silently burning the whole
+// budget one failed request at a time.
+const maxPollTransientErrors = 10
+
+// TokenEndpointError is a concrete, typed error returned by RefreshToken (and
+// available to future callers) that carries enough structure to tell a real
+// authentication failure (invalid_grant / HTTP 4xx → the user must re-login)
+// apart from a transient one (5xx or a transport failure → worth retrying).
+type TokenEndpointError struct {
+	// Status is the HTTP status code, or 0 for a transport-level failure that
+	// never produced a response.
+	Status int
+	// Code is the OAuth2 error code (e.g. "invalid_grant"), or a synthetic code
+	// like "transport" when the request never reached the server.
+	Code string
+	// Description is the human-readable error_description or raw detail.
+	Description string
+	// err is the underlying cause, exposed via Unwrap for errors.Is/As.
+	err error
+}
+
+func (e *TokenEndpointError) Error() string {
+	switch {
+	case e.Code != "" && e.Description != "":
+		return fmt.Sprintf("token endpoint error (status %d): %s - %s", e.Status, e.Code, e.Description)
+	case e.Code != "":
+		return fmt.Sprintf("token endpoint error (status %d): %s", e.Status, e.Code)
+	default:
+		return fmt.Sprintf("token endpoint error (status %d)", e.Status)
+	}
+}
+
+// Unwrap exposes the underlying transport error, if any.
+func (e *TokenEndpointError) Unwrap() error { return e.err }
+
+// Transient reports whether the failure looks worth retrying: a transport
+// failure (Status 0) or any server-side 5xx. A 4xx — most importantly
+// invalid_grant / HTTP 400 — is a real auth failure and is not transient.
+func (e *TokenEndpointError) Transient() bool {
+	return e.Status == 0 || e.Status >= 500
+}
+
 // OIDCEndpoints holds the discovered OpenID Connect endpoints.
 type OIDCEndpoints struct {
 	DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint"`
@@ -159,21 +221,47 @@ func (d *DeviceFlow) RequestDeviceAuthorization(deviceAuthEndpoint string) (*Dev
 }
 
 // PollForToken polls the token endpoint until the user completes authentication.
+//
+// It delegates to PollForTokenContext with a background context so the existing
+// signature (used by cmd/login.go) stays stable; new callers that want
+// cancellation should call PollForTokenContext directly.
 func (d *DeviceFlow) PollForToken(tokenEndpoint, deviceCode string, interval time.Duration, expiresAt time.Time) (*TokenResponse, error) {
+	return d.PollForTokenContext(context.Background(), tokenEndpoint, deviceCode, interval, expiresAt)
+}
+
+// PollForTokenContext polls the token endpoint until the user completes
+// authentication, the device code expires, or ctx is cancelled.
+//
+// Transient network failures (a request that never got a response, or a body
+// that could not be read) do not abort the flow: they are tolerated up to
+// maxPollTransientErrors consecutive occurrences within the expiry budget, so a
+// momentary blip while the user is authorizing doesn't kill the login. The poll
+// interval is grown on slow_down per RFC 8628 but capped at maxPollInterval so a
+// misbehaving server cannot push it up without bound.
+func (d *DeviceFlow) PollForTokenContext(ctx context.Context, tokenEndpoint, deviceCode string, interval time.Duration, expiresAt time.Time) (*TokenResponse, error) {
 	data := url.Values{
 		"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
 		"client_id":   {d.clientID},
 		"device_code": {deviceCode},
 	}
 
+	transientErrors := 0
+
 	for {
 		if time.Now().After(expiresAt) {
 			return nil, fmt.Errorf("device authorization expired. Please try again")
 		}
 
-		time.Sleep(interval)
+		// Sleep for the interval, but wake early if the caller cancels.
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
 
-		reqCtx, cancel := context.WithTimeout(context.Background(), deviceRequestTimeout)
+		reqCtx, cancel := context.WithTimeout(ctx, deviceRequestTimeout)
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, tokenEndpoint, strings.NewReader(data.Encode()))
 		if err != nil {
 			cancel()
@@ -184,15 +272,34 @@ func (d *DeviceFlow) PollForToken(tokenEndpoint, deviceCode string, interval tim
 		resp, err := d.client.Do(req)
 		if err != nil {
 			cancel()
-			return nil, fmt.Errorf("token request failed: %w", err)
+			// Honour caller cancellation immediately; only tolerate genuine
+			// transient failures.
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			transientErrors++
+			if transientErrors >= maxPollTransientErrors {
+				return nil, fmt.Errorf("token request failed after %d attempts: %w", transientErrors, err)
+			}
+			continue
 		}
 
 		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		cancel()
 		if err != nil {
-			return nil, fmt.Errorf("failed to read token response: %w", err)
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			transientErrors++
+			if transientErrors >= maxPollTransientErrors {
+				return nil, fmt.Errorf("failed to read token response after %d attempts: %w", transientErrors, err)
+			}
+			continue
 		}
+
+		// A response came back; reset the transient-failure budget.
+		transientErrors = 0
 
 		if resp.StatusCode == http.StatusOK {
 			var tokenResp TokenResponse
@@ -212,8 +319,9 @@ func (d *DeviceFlow) PollForToken(tokenEndpoint, deviceCode string, interval tim
 			// Continue polling
 			continue
 		case "slow_down":
-			// Increase interval by 5 seconds per RFC 8628
-			interval += 5 * time.Second
+			// Increase the interval per RFC 8628, but never past the cap so a
+			// repeated slow_down cannot grow it without bound.
+			interval = nextSlowDownInterval(interval)
 			continue
 		case "expired_token":
 			return nil, fmt.Errorf("device code expired. Please try again")
@@ -242,17 +350,44 @@ func (d *DeviceFlow) RefreshToken(ctx context.Context, tokenEndpoint, refreshTok
 
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("refresh token request failed: %w", err)
+		// No response reached us: a transport-level failure (Status 0), which
+		// Transient() classifies as retryable.
+		return nil, &TokenEndpointError{
+			Status:      0,
+			Code:        "transport",
+			Description: err.Error(),
+			err:         err,
+		}
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read refresh response: %w", err)
+		return nil, &TokenEndpointError{
+			Status:      resp.StatusCode,
+			Code:        "transport",
+			Description: fmt.Sprintf("failed to read refresh response: %v", err),
+			err:         err,
+		}
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("refresh failed with status %d: %s", resp.StatusCode, string(body))
+		// Surface the status and the OAuth error code (if the body carried one)
+		// so callers can tell invalid_grant / 4xx (re-login) apart from 5xx
+		// (transient) via TokenEndpointError.Transient / errors.As.
+		var errResp TokenErrorResponse
+		_ = json.Unmarshal(body, &errResp)
+		code := errResp.Error
+		desc := errResp.ErrorDescription
+		if code == "" {
+			// No structured body; fall back to the raw payload for context.
+			desc = strings.TrimSpace(string(body))
+		}
+		return nil, &TokenEndpointError{
+			Status:      resp.StatusCode,
+			Code:        code,
+			Description: desc,
+		}
 	}
 
 	var tokenResp TokenResponse

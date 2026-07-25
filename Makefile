@@ -1,6 +1,11 @@
-.PHONY: build build-all clean
+.PHONY: build build-all clean test lint vet fmt cover
 
 BINARY_NAME=kagi
+# NOTE: this VERSION default (0.1.0) only stamps `make build`; it does not match
+# the `main.go` "dev" sentinel (the compiled-in fallback when -ldflags is absent)
+# nor the git tag that goreleaser stamps on a real release. Left as-is so plain
+# `make build` produces a recognizable non-"dev" local binary; don't rely on it
+# for released version numbers.
 VERSION?=0.1.0
 
 build:
@@ -17,5 +22,26 @@ build-darwin-amd64:
 build-linux-amd64:
 	GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=$(VERSION)" -o bin/$(BINARY_NAME)-linux-amd64 .
 
+# Test both modules: the root module and the separate sdk/ module.
+test:
+	go test -race ./...
+	cd sdk && go test -race ./...
+
+vet:
+	go vet ./...
+	cd sdk && go vet ./...
+
+lint:
+	golangci-lint run
+
+fmt:
+	gofmt -w .
+	cd sdk && gofmt -w .
+
+# Coverage for the root module only.
+cover:
+	go test -race -coverprofile=coverage.out ./...
+	go tool cover -func=coverage.out
+
 clean:
-	rm -rf bin/
+	rm -rf bin/ coverage.out

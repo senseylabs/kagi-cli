@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # Root module: github.com/senseylabs/kagi-cli
+  root:
+    name: root module (vet + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race
+        run: go test -race ./...
+
+  # SDK is a separate module (github.com/senseylabs/kagi-sdk); it has its own
+  # go.mod, so it must be vetted and tested on its own from within sdk/.
+  sdk:
+    name: sdk module (vet + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: sdk/go.mod
+          cache: true
+          cache-dependency-path: sdk/go.sum
+
+      - name: go vet
+        run: cd sdk && go vet ./...
+
+      - name: go test -race
+        run: cd sdk && go test -race ./...
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest

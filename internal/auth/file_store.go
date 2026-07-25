@@ -1,10 +1,10 @@
-//go:build !darwin
-
 package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -13,8 +13,10 @@ type fileStore struct {
 	path string
 }
 
-// NewTokenStore returns a file-based token store for non-macOS systems.
-func NewTokenStore() TokenStore {
+// newFileStore returns the plaintext file-backed fallback store used when no OS
+// secret service is available. It is unexported: callers reach it through
+// NewTokenStore, which decides between the keyring and this fallback.
+func newFileStore() *fileStore {
 	home, _ := os.UserHomeDir()
 	return &fileStore{
 		path: filepath.Join(home, ".kagi", "credentials"),
@@ -49,11 +51,23 @@ func (f *fileStore) Save(creds Credentials) error {
 		tmp.Close()
 		return fmt.Errorf("failed to write temp credentials file: %w", err)
 	}
+	// Harden the mode explicitly: this file holds plaintext credentials, and we
+	// do not want to rely solely on os.CreateTemp's default. Chmod before the
+	// rename so the target is never briefly world-readable.
+	if err := os.Chmod(tmpName, 0600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("failed to set credentials file mode: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("failed to close temp credentials file: %w", err)
 	}
 	if err := os.Rename(tmpName, f.path); err != nil {
 		return fmt.Errorf("failed to write credentials file: %w", err)
+	}
+	// Belt-and-suspenders: enforce 0600 on the final path too, in case a
+	// pre-existing target carried looser bits that survived the rename.
+	if err := os.Chmod(f.path, 0600); err != nil {
+		return fmt.Errorf("failed to set credentials file mode: %w", err)
 	}
 	return nil
 }
@@ -61,7 +75,13 @@ func (f *fileStore) Save(creds Credentials) error {
 func (f *fileStore) Load() (Credentials, error) {
 	data, err := os.ReadFile(f.path)
 	if err != nil {
-		return Credentials{}, fmt.Errorf("no credentials found at %s: %w", f.path, err)
+		if errors.Is(err, fs.ErrNotExist) {
+			// Keep the "no credentials found" substring and wrap both the
+			// sentinel and the backend cause so errors.Is matches either.
+			return Credentials{}, fmt.Errorf("no credentials found at %s: %w", f.path,
+				errors.Join(ErrNoCredentials, err))
+		}
+		return Credentials{}, fmt.Errorf("failed to read credentials file %s: %w", f.path, err)
 	}
 
 	var creds Credentials

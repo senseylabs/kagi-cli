@@ -100,6 +100,206 @@ func TestGetWithRetry_503ThenSuccess(t *testing.T) {
 	}
 }
 
+// TestGetWithRetry_429ThenSuccess covers the newly-retryable 429: two 429s then
+// a 200.
+func TestGetWithRetry_429ThenSuccess(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) <= 2 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, "slow down")
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	resp, err := GetWithRetry(ctx, srv.Client(), srv.URL, fastOptions(nil))
+	if err != nil {
+		t.Fatalf("expected success after 429 retries, got error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("expected 3 server calls, got %d", got)
+	}
+}
+
+// TestGetWithRetry_RetryAfterHonoured proves a Retry-After header on a 503 is
+// used in place of the computed backoff: the fast backoff (10-20ms) would retry
+// almost immediately, so a 1s Retry-After is observable as a ~1s gap before the
+// second attempt fires.
+func TestGetWithRetry_RetryAfterHonoured(t *testing.T) {
+	var calls int32
+	var firstAt time.Time
+	var gap time.Duration
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			firstAt = time.Now()
+			w.Header().Set("Retry-After", "1") // delta-seconds
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		gap = time.Since(firstAt)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := GetWithRetry(ctx, srv.Client(), srv.URL, fastOptions(nil))
+	if err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	// The gap must reflect the honored 1s header, not the 10-20ms backoff.
+	if gap < 900*time.Millisecond {
+		t.Fatalf("Retry-After not honoured: second attempt fired after %s, want ~1s", gap)
+	}
+}
+
+// TestRetryAfterDelay unit-tests the header parser across delta-seconds,
+// HTTP-date, and out-of-range/garbage inputs.
+func TestRetryAfterDelay(t *testing.T) {
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name   string
+		header string
+		want   time.Duration
+		ok     bool
+	}{
+		{"absent", "", 0, false},
+		{"delta zero", "0", 0, true},
+		{"delta seconds", "5", 5 * time.Second, true},
+		{"delta negative", "-1", 0, false},
+		{"delta too large", "10000", 0, false},
+		{"http date future", now.Add(30 * time.Second).UTC().Format(http.TimeFormat), 30 * time.Second, true},
+		{"http date past", now.Add(-30 * time.Second).UTC().Format(http.TimeFormat), 0, true},
+		{"garbage", "soon", 0, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := http.Header{}
+			if tc.header != "" {
+				h.Set("Retry-After", tc.header)
+			}
+			got, ok := retryAfterDelay(h, now)
+			if ok != tc.ok {
+				t.Fatalf("ok = %v, want %v", ok, tc.ok)
+			}
+			if ok && got != tc.want {
+				t.Fatalf("delay = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestJitterBackoff pins full jitter to its bounds using a deterministic
+// injected source: for any fraction in [0,1] the sleep must land in [0, base].
+func TestJitterBackoff(t *testing.T) {
+	base := 800 * time.Millisecond
+	for _, frac := range []float64{0, 0.001, 0.25, 0.5, 0.9999, 1} {
+		got := jitterBackoff(base, func() float64 { return frac })
+		if got < 0 || got > base {
+			t.Fatalf("frac %v: jitter %s out of [0,%s]", frac, got, base)
+		}
+	}
+	// Exact endpoints.
+	if got := jitterBackoff(base, func() float64 { return 0 }); got != 0 {
+		t.Fatalf("frac 0 should sleep 0, got %s", got)
+	}
+	if got := jitterBackoff(base, func() float64 { return 1 }); got != base {
+		t.Fatalf("frac 1 should sleep base, got %s", got)
+	}
+	// Out-of-range fractions are clamped, never producing a negative or > base sleep.
+	if got := jitterBackoff(base, func() float64 { return -5 }); got != 0 {
+		t.Fatalf("negative frac should clamp to 0, got %s", got)
+	}
+	if got := jitterBackoff(base, func() float64 { return 5 }); got != base {
+		t.Fatalf("frac > 1 should clamp to base, got %s", got)
+	}
+}
+
+// TestGetWithRetry_JitterSourceInjected drives GetWithRetry with a deterministic
+// jitter source (always 0 → retry immediately) to prove the injected seam is
+// actually consulted on the backoff path and that a 503-then-200 still succeeds.
+func TestGetWithRetry_JitterSourceInjected(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	opts := fastOptions(nil)
+	// InitialBackoff of 10s would blow the test budget if actually slept; the
+	// zero-fraction jitter must collapse it to ~0.
+	opts.InitialBackoff = 10 * time.Second
+	opts.MaxBackoff = 10 * time.Second
+	opts.jitterSrc = func() float64 { return 0 }
+
+	start := time.Now()
+	resp, err := GetWithRetry(ctx, srv.Client(), srv.URL, opts)
+	if err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+	defer resp.Body.Close()
+	if elapsed := time.Since(start); elapsed > 1*time.Second {
+		t.Fatalf("zero-jitter backoff should retry near-immediately, took %s", elapsed)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected 2 server calls, got %d", got)
+	}
+}
+
+// TestGetWithRetry_CallerCancellation proves a caller-cancelled context is
+// reported as context.Canceled — distinct from ErrRetryBudgetExhausted — so a
+// deliberate Ctrl-C is not misreported as an unreachable auth service.
+func TestGetWithRetry_CallerCancellation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done() // never respond
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel shortly after the first attempt begins.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	defer cancel()
+
+	_, err := GetWithRetry(ctx, srv.Client(), srv.URL, fastOptions(nil))
+	if err == nil {
+		t.Fatalf("expected an error on cancellation")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	if errors.Is(err, ErrRetryBudgetExhausted) {
+		t.Fatalf("cancellation must not be reported as budget exhaustion: %v", err)
+	}
+}
+
 // TestGetWithRetry_404NoRetry proves a definitive 4xx (a wrong issuer) returns
 // immediately without burning the budget.
 func TestGetWithRetry_404NoRetry(t *testing.T) {
