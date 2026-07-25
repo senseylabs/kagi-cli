@@ -32,6 +32,10 @@ type CertificateReveal = kagi.CertificateReveal
 type CertificateHistory = kagi.CertificateHistory
 type CertificateFolderItem = kagi.CertificateFolderItem
 type CertificateResolve = kagi.CertificateResolve
+type PasswordListItem = kagi.PasswordListItem
+type PasswordResolve = kagi.PasswordResolve
+type PasswordReveal = kagi.PasswordReveal
+type PasswordHistory = kagi.PasswordHistory
 
 // APIErrorResponse represents an error response from the API.
 type APIErrorResponse struct {
@@ -261,6 +265,38 @@ func (c *KagiClient) RevealCertificate(certID string) (*CertificateReveal, error
 // GetCertificateHistory returns audit history for a certificate.
 func (c *KagiClient) GetCertificateHistory(certID string) ([]CertificateHistory, error) {
 	return c.sdkClient.GetCertificateHistory(context.Background(), certID)
+}
+
+// ListPasswordFolderChildren browses a PASSWORDS folder path and returns its
+// child folders (password leaves come from ListPasswordsInFolder).
+func (c *KagiClient) ListPasswordFolderChildren(path string) (*FolderChildren, error) {
+	return c.sdkClient.ListPasswordFolderChildren(context.Background(), path)
+}
+
+// ListPasswordsInFolder returns the passwords held directly inside the password
+// folder addressed by path, with masked values.
+func (c *KagiClient) ListPasswordsInFolder(path string) ([]PasswordListItem, error) {
+	return c.sdkClient.ListPasswordsInFolder(context.Background(), path)
+}
+
+// ResolvePassword resolves a password node path to its stable id and username.
+func (c *KagiClient) ResolvePassword(path string) (*PasswordResolve, error) {
+	return c.sdkClient.ResolvePassword(context.Background(), path)
+}
+
+// GetPasswordDetail returns a single password's masked metadata by id.
+func (c *KagiClient) GetPasswordDetail(passwordID string) (*PasswordListItem, error) {
+	return c.sdkClient.GetPasswordDetail(context.Background(), passwordID)
+}
+
+// RevealPassword returns the decrypted password value by id.
+func (c *KagiClient) RevealPassword(passwordID string) (*PasswordReveal, error) {
+	return c.sdkClient.RevealPassword(context.Background(), passwordID)
+}
+
+// GetPasswordHistory returns the change history for a password by id.
+func (c *KagiClient) GetPasswordHistory(passwordID string) ([]PasswordHistory, error) {
+	return c.sdkClient.GetPasswordHistory(context.Background(), passwordID)
 }
 
 // ---------------------------------------------------------------------------

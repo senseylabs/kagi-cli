@@ -147,6 +147,66 @@ type CertificateHistory struct {
 	CreatedAt     string `json:"createdAt"`
 }
 
+// PasswordListItem represents a password leaf held directly inside a PASSWORDS
+// folder, with a masked value. Passwords carry no name or slug — a credential is
+// identified by its login username and service URL. The ID is the stable machine
+// binding used to address the password's by-id read/reveal/history endpoints,
+// unchanged across folder moves. The by-id detail endpoint returns this same
+// shape, so it doubles as the detail model. HasLinkedTOTP reports whether a 2FA
+// authenticator item is linked; the Linked* fields are populated only when the
+// caller can reach that linked code (empty otherwise).
+type PasswordListItem struct {
+	ID                        string `json:"id"`
+	Username                  string `json:"username"`
+	URL                       string `json:"url"`
+	MaskedPassword            string `json:"maskedPassword"`
+	HasNotes                  bool   `json:"hasNotes"`
+	HasLinkedTOTP             bool   `json:"hasLinkedTotp"`
+	LinkedAuthenticatorItemID string `json:"linkedAuthenticatorItemId"`
+	LinkedTOTPFolderPath      string `json:"linkedTotpFolderPath"`
+	LinkedTOTPLabel           string `json:"linkedTotpLabel"`
+	CreatedAt                 string `json:"createdAt"`
+	UpdatedAt                 string `json:"updatedAt"`
+}
+
+// PasswordResolve is the result of resolving a human-entered password node path
+// to its stable id. Passwords have no dedicated resolve endpoint (and no
+// name/slug), so resolution browses the parent folder's password leaves and
+// matches the final path segment against the login username — the password
+// analog of the secrets ResolveApp step. Username echoes the matched credential.
+type PasswordResolve struct {
+	PasswordID string
+	Username   string
+}
+
+// PasswordReveal holds a decrypted password value with its username, URL, and
+// notes. Username and Notes may be empty for credentials that carry neither
+// (e.g. passkeys, secure notes). The Linked* fields carry the linked
+// authenticator item id and its owning app id when a 2FA code is linked.
+type PasswordReveal struct {
+	ID                           string `json:"id"`
+	Username                     string `json:"username"`
+	URL                          string `json:"url"`
+	Password                     string `json:"password"`
+	Notes                        string `json:"notes"`
+	LinkedAuthenticatorItemID    string `json:"linkedAuthenticatorItemId"`
+	LinkedAuthenticatorItemAppID string `json:"linkedAuthenticatorItemAppId"`
+}
+
+// PasswordHistory represents an audit history entry for a password. The metadata
+// never carries the plaintext value. ChangeType is one of CREATED, UPDATED,
+// DELETED, MOVED; PreviousAppID is populated only for a MOVED entry.
+type PasswordHistory struct {
+	ID            string `json:"id"`
+	PasswordID    string `json:"passwordId"`
+	Username      string `json:"username"`
+	URL           string `json:"url"`
+	ChangeType    string `json:"changeType"`
+	ChangedBy     string `json:"changedBy"`
+	PreviousAppID string `json:"previousAppId"`
+	CreatedAt     string `json:"createdAt"`
+}
+
 // APIResponse wraps the standard Kagi API response envelope.
 type APIResponse[T any] struct {
 	Data    T      `json:"data"`

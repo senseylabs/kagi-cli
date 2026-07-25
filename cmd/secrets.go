@@ -135,6 +135,13 @@ func runSecretsBrowse(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Bare `kagi secrets` on a terminal (table output, no path arg) drops into the
+	// read-only drill-down picker. Every scripted/non-table/path-given invocation
+	// keeps the one-shot listing below untouched.
+	if shouldBrowseInteractively(cmd, args) {
+		return runSecretsInteractiveBrowse(u, vc)
+	}
+
 	path := "/"
 	if len(args) == 1 {
 		path = args[0]
@@ -162,6 +169,119 @@ func runSecretsBrowse(cmd *cobra.Command, args []string) error {
 	}
 
 	return u.Print(format, children, table)
+}
+
+// runSecretsInteractiveBrowse drives the read-only drill-down for a bare
+// `kagi secrets` on a terminal. It walks the SECRETS folder tree via
+// ListFolderChildren (folders plus app leaves), and on selecting an app shows
+// that app's environments so the user can pick one and view its masked secrets —
+// values are never revealed. It also prints the exact one-shot command to act on
+// the chosen app. Everything here is read-only.
+func runSecretsInteractiveBrowse(u *ui.UI, vc *client.KagiClient) error {
+	// appIDByPath maps a leaf's display path to the app's stable ID, captured
+	// while listing so onLeaf can address the app without re-resolving the path.
+	appIDByPath := map[string]string{}
+
+	listChildren := func(path string) (folders []BrowseNode, leaves []BrowseNode, err error) {
+		children, err := vc.ListFolderChildren(path)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to browse %q: %w", path, err)
+		}
+		folders = make([]BrowseNode, 0, len(children.Folders))
+		for _, f := range children.Folders {
+			folders = append(folders, BrowseNode{
+				Name: f.Slug,
+				Path: secretsChildPath(path, f.Slug),
+			})
+		}
+		leaves = make([]BrowseNode, 0, len(children.Apps))
+		for _, a := range children.Apps {
+			appPath := secretsChildPath(path, a.Slug)
+			appIDByPath[appPath] = a.ID
+			leaves = append(leaves, BrowseNode{
+				Name:      a.Slug,
+				Path:      appPath,
+				Label:     a.Name,
+				Secondary: a.ID,
+			})
+		}
+		return folders, leaves, nil
+	}
+
+	onLeaf := func(path string, _ BrowseNode) error {
+		return browseSecretsApp(u, vc, path, appIDByPath[path])
+	}
+
+	return runInteractiveBrowse(u, "/", listChildren, onLeaf)
+}
+
+// browseSecretsApp is the leaf action of the secrets browser: it lists the app's
+// environments, lets the user pick one, and prints that environment's masked
+// secrets (reusing the same masked-list shape as `secrets list`). It always
+// echoes the one-shot command to act on the app. Selecting nothing (go up / quit)
+// simply returns to the folder listing. Read-only throughout.
+func browseSecretsApp(u *ui.UI, vc *client.KagiClient, appPath, appID string) error {
+	label := appLabel(appPath, appID)
+
+	envs, err := vc.ListEnvironments(appID)
+	if err != nil {
+		return classifyAppError(err, label)
+	}
+
+	u.Info("App %s", label)
+	u.Info("Act on it with: kagi secrets list -p %s -e <env>", appPath)
+
+	if len(envs) == 0 {
+		u.Info("No environments for this app.")
+		return nil
+	}
+
+	items := make([]ui.PickItem, 0, len(envs))
+	for _, e := range envs {
+		items = append(items, ui.PickItem{
+			Label:     e.Slug,
+			Secondary: e.Name,
+			Value:     e,
+		})
+	}
+
+	res, err := u.Pick(appPath+" — pick an environment", items, ui.PickOptions{AllowUp: true})
+	if err != nil {
+		return err
+	}
+	if res.Kind != ui.PickSelected {
+		return nil
+	}
+	env := res.Item.Value.(client.Environment)
+
+	secrets, err := vc.ListSecrets(appID, env.Slug)
+	if err != nil {
+		return fmt.Errorf("failed to list secrets: %w", err)
+	}
+
+	u.Info("Masked secrets for %s -e %s (view with: kagi secrets get <KEY> -p %s -e %s)",
+		appPath, env.Slug, appPath, env.Slug)
+
+	if len(secrets) == 0 {
+		u.Info("No secrets in %s -e %s.", appPath, env.Slug)
+		return nil
+	}
+
+	table := ui.NewTable("KEY", "VALUE", "UPDATED").
+		SetTruncatable(1, 0)
+	for _, s := range secrets {
+		table.AddRow(s.KeyName, s.MaskedValue, s.UpdatedAt)
+	}
+	return u.Render(table)
+}
+
+// secretsChildPath joins a browse parent path and a child slug into the "/"-
+// rooted path form used throughout the secrets browser (matching browseParent).
+func secretsChildPath(parent, slug string) string {
+	if parent == "" || parent == "/" {
+		return "/" + slug
+	}
+	return strings.TrimRight(parent, "/") + "/" + slug
 }
 
 func runSecretEnvs(cmd *cobra.Command, args []string) error {

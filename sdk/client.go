@@ -230,6 +230,99 @@ func (c *Client) GetCertificateHistory(ctx context.Context, certID string) ([]Ce
 	return resp.Data, nil
 }
 
+// ErrPasswordNotFound is returned by ResolvePassword when the parent folder is
+// reachable but holds no password whose username matches the requested leaf. It
+// is distinct from a transport or authorization error on the browse itself,
+// mirroring ErrAppNotFound for the secrets resolve path.
+var ErrPasswordNotFound = errors.New("password not found")
+
+// ListPasswordFolderChildren browses a PASSWORDS folder path and returns its
+// child folders. Like the certificates library the children listing carries no
+// leaf items for passwords (its Apps slice is always empty); the password leaves
+// under a folder are served by ListPasswordsInFolder. It hits
+// GET /kagi/folders/passwords/children/{*path}.
+func (c *Client) ListPasswordFolderChildren(ctx context.Context, path string) (*FolderChildren, error) {
+	return c.ListFolderChildren(ctx, LibraryPasswords, path)
+}
+
+// ListPasswordsInFolder returns the passwords held directly inside the password
+// folder addressed by path, with masked values. It hits
+// GET /kagi/folders/passwords/items/{*path}. An empty or "/" path lists the
+// passwords at the passwords root. A large page size is requested so the browse
+// returns every password in the folder in one call (the endpoint paginates with
+// a small default). Results are sorted by username — the entity has no name.
+func (c *Client) ListPasswordsInFolder(ctx context.Context, path string) ([]PasswordListItem, error) {
+	var resp APIResponse[[]PasswordListItem]
+	if err := c.doGet(ctx, passwordItemsPath(path), &resp); err != nil {
+		return nil, err
+	}
+	return resp.Data, nil
+}
+
+// ResolvePassword resolves a human-entered password node path to the password's
+// stable id and login username. The final path segment is matched
+// case-insensitively against the login username of the passwords held directly
+// in the preceding folder; the earlier segments identify that folder. Passwords
+// have no dedicated resolve endpoint and no name/slug, so this browses the
+// parent folder's leaves — the password analog of the secrets ResolveApp step.
+// The returned id is the durable machine binding, valid across folder moves.
+func (c *Client) ResolvePassword(ctx context.Context, path string) (*PasswordResolve, error) {
+	trimmed := strings.Trim(path, "/")
+	if trimmed == "" {
+		return nil, fmt.Errorf("kagi: password path %q does not address a password", path)
+	}
+
+	segments := strings.Split(trimmed, "/")
+	leaf := segments[len(segments)-1]
+	parentPath := "/" + strings.Join(segments[:len(segments)-1], "/")
+
+	items, err := c.ListPasswordsInFolder(ctx, parentPath)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, it := range items {
+		if strings.EqualFold(it.Username, leaf) {
+			return &PasswordResolve{PasswordID: it.ID, Username: it.Username}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("kagi: no password with username %q under folder %q: %w", leaf, parentPath, ErrPasswordNotFound)
+}
+
+// GetPasswordDetail returns a single password's masked metadata by id. Passwords
+// are folder-independent, so this is addressed by id rather than by folder path.
+// The backend serves the list DTO for this route, so the detail shares the
+// PasswordListItem shape. It hits GET /kagi/folders/passwords/by-id/{id}.
+func (c *Client) GetPasswordDetail(ctx context.Context, passwordID string) (*PasswordListItem, error) {
+	var resp APIResponse[PasswordListItem]
+	if err := c.doGet(ctx, fmt.Sprintf("/kagi/folders/passwords/by-id/%s", passwordID), &resp); err != nil {
+		return nil, err
+	}
+	return &resp.Data, nil
+}
+
+// RevealPassword returns the decrypted password value by id. It hits
+// GET /kagi/folders/passwords/by-id/{id}/reveal.
+func (c *Client) RevealPassword(ctx context.Context, passwordID string) (*PasswordReveal, error) {
+	var resp APIResponse[PasswordReveal]
+	if err := c.doGet(ctx, fmt.Sprintf("/kagi/folders/passwords/by-id/%s/reveal", passwordID), &resp); err != nil {
+		return nil, err
+	}
+	return &resp.Data, nil
+}
+
+// GetPasswordHistory returns the change history for a password by id. History
+// metadata never carries the plaintext value. It hits
+// GET /kagi/folders/passwords/by-id/{id}/history.
+func (c *Client) GetPasswordHistory(ctx context.Context, passwordID string) ([]PasswordHistory, error) {
+	var resp APIResponse[[]PasswordHistory]
+	if err := c.doGet(ctx, fmt.Sprintf("/kagi/folders/passwords/by-id/%s/history", passwordID), &resp); err != nil {
+		return nil, err
+	}
+	return resp.Data, nil
+}
+
 // orgListPath is the one org-scoped endpoint reachable before an org is
 // selected — it is how a JWT user discovers which orgs they may select.
 const orgListPath = "/kagi/organizations"
@@ -260,6 +353,16 @@ func certificateItemsPath(path string) string {
 // segments then the certificate slug) is appended last.
 func certificateResolvePath(path string) string {
 	return "/kagi/folders/certificates/resolve" + normalizeFolderPath(path)
+}
+
+// passwordItemsPath builds the folder-addressed password-items URL. Like
+// certificateItemsPath the route uses a terminal capturing wildcard, so the path
+// is appended last; an empty/"/" path lists the root. A large page size is
+// requested so the single call returns every password in the folder (the
+// endpoint paginates with a small default). Sort is by username because the
+// KagiPassword entity has no name property to sort on.
+func passwordItemsPath(path string) string {
+	return "/kagi/folders/passwords/items" + normalizeFolderPath(path) + "?size=500&sort=username"
 }
 
 // normalizeFolderPath collapses a folder path to the canonical wildcard suffix:

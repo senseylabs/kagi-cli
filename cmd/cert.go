@@ -272,6 +272,13 @@ func runCertBrowse(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// A bare, human-facing invocation on a terminal drills through the folder
+	// tree interactively; a path arg, piped output, or -o json/yaml keeps the
+	// one-shot listing below exactly as-is.
+	if shouldBrowseInteractively(cmd, args) {
+		return runCertInteractiveBrowse(u, vc)
+	}
+
 	path := "/"
 	if len(args) == 1 {
 		path = args[0]
@@ -311,6 +318,80 @@ func runCertBrowse(cmd *cobra.Command, args []string) error {
 		table.AddRow("cert", c.Name, c.Slug, base+"/"+c.Slug, c.NotAfter)
 	}
 	return u.Print(format, payload, table)
+}
+
+// runCertInteractiveBrowse drives the shared drill-down picker over the
+// certificate folder tree, starting at the root. At each level it lists the
+// child folders and the certificates held directly inside the current folder;
+// selecting a certificate shows its detail and offers to reveal its PEM content.
+func runCertInteractiveBrowse(u *ui.UI, vc *client.KagiClient) error {
+	listChildren := func(path string) (folders []BrowseNode, leaves []BrowseNode, err error) {
+		children, err := vc.ListCertificateFolderChildren(path)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to browse %q: %w", path, err)
+		}
+		certs, err := vc.ListCertificatesInFolder(path)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to list certificates under %q: %w", path, err)
+		}
+		base := strings.TrimRight(path, "/")
+		for _, f := range children.Folders {
+			folders = append(folders, BrowseNode{Name: f.Name, Path: base + "/" + f.Slug})
+		}
+		for _, c := range certs {
+			// Expiry as the dim supporting text, mirroring the one-shot table's
+			// EXPIRES column.
+			leaves = append(leaves, BrowseNode{Name: c.Name, Path: base + "/" + c.Slug, Secondary: c.NotAfter})
+		}
+		return folders, leaves, nil
+	}
+
+	onLeaf := func(path string, leaf BrowseNode) error {
+		return showCertDetailInteractive(u, vc, path)
+	}
+
+	return runInteractiveBrowse(u, "/", listChildren, onLeaf)
+}
+
+// showCertDetailInteractive renders a chosen certificate's detail during an
+// interactive browse and then offers to reveal its PEM content. The certificate
+// is addressed by its node path (resolved to the stable id via the same
+// path-to-id contract `cert get` uses). A failed reveal is surfaced as a warning
+// and does not abort the browse; a failure to load the detail does.
+func showCertDetailInteractive(u *ui.UI, vc *client.KagiClient, path string) error {
+	certPath := "/" + strings.Trim(path, "/")
+
+	resolved, err := vc.ResolveCertificate(certPath)
+	if err != nil {
+		return err
+	}
+
+	detail, err := vc.GetCertificateDetail(resolved.CertificateID)
+	if err != nil {
+		return fmt.Errorf("failed to get certificate details: %w", err)
+	}
+
+	if err := printCertDetail(u, ui.FormatTable, detail, certPath); err != nil {
+		return err
+	}
+
+	if !u.Confirm(fmt.Sprintf("Reveal PEM content for %q?", detail.Name)) {
+		return nil
+	}
+
+	revealed, err := vc.RevealCertificate(resolved.CertificateID)
+	if err != nil {
+		u.Warn("Failed to reveal certificate: %v", err)
+		return nil
+	}
+
+	// The PEM material is data — it goes to stdout so it can be piped or
+	// redirected even mid-browse.
+	fmt.Fprint(u.Out(), revealed.CertificateContent)
+	if revealed.PrivateKeyContent != "" {
+		fmt.Fprint(u.Out(), revealed.PrivateKeyContent)
+	}
+	return nil
 }
 
 // resolveCertRef turns a CLI argument into a certificate id and display name. A
@@ -512,6 +593,14 @@ func runCertGet(cmd *cobra.Command, args []string) error {
 		certPath = lookupCertPath(vc, certID)
 	}
 
+	return printCertDetail(u, format, detail, certPath)
+}
+
+// printCertDetail renders a certificate's full detail — the field/value table
+// for humans, the flattened payload for json/yaml — with the folder node path it
+// lives in (omitted when unknown). Shared by `cert get` and the interactive
+// browse leaf so both show an identical detail view.
+func printCertDetail(u *ui.UI, format ui.Format, detail *client.CertificateDetail, certPath string) error {
 	table := ui.NewTable("FIELD", "VALUE")
 	table.SetTruncatable(1, 0)
 	table.AddRow("Name", detail.Name)
