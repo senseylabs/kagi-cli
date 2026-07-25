@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/senseylabs/kagi-cli/internal/client"
+	"github.com/senseylabs/kagi-cli/internal/ui"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -105,6 +106,8 @@ func runClusterApply(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	u := newUI()
+
 	// Resolve the issuer's identity (URL + display name). The URL is the
 	// idempotency key, so it is resolved before we look for an existing issuer. The
 	// detected type is intentionally discarded here: apply resolves the type
@@ -174,15 +177,15 @@ func runClusterApply(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to register cluster issuer %q: %w", issuerURL, err)
 		}
-		fmt.Printf("issuer %q: created (%s)\n", issuer.DisplayName, issuer.IssuerURL)
+		u.Info("issuer %q: created (%s)", issuer.DisplayName, issuer.IssuerURL)
 	case issuerActionUpdate:
 		issuer, err = vc.UpdateClusterIssuer(existingIssuer.ID, name, desiredJwks, desiredEnabled, desiredType)
 		if err != nil {
 			return fmt.Errorf("failed to update cluster issuer %q: %w", name, err)
 		}
-		fmt.Printf("issuer %q: updated (%s)\n", issuer.DisplayName, issuer.IssuerURL)
+		u.Info("issuer %q: updated (%s)", issuer.DisplayName, issuer.IssuerURL)
 	default: // issuerActionUnchanged
-		fmt.Printf("issuer %q: unchanged (%s)\n", issuer.DisplayName, issuer.IssuerURL)
+		u.Info("issuer %q: unchanged (%s)", issuer.DisplayName, issuer.IssuerURL)
 	}
 
 	// Snapshot existing bindings once; reconcile each desired binding against it.
@@ -214,19 +217,26 @@ func runClusterApply(cmd *cobra.Command, args []string) error {
 			if _, err := vc.CreateWorkloadBinding(issuer.ID, b.Namespace, b.ServiceAccount, scopes); err != nil {
 				return fmt.Errorf("failed to create workload binding %s/%s: %w", b.Namespace, b.ServiceAccount, err)
 			}
-			fmt.Printf("binding %s/%s: created (%d scope(s))\n", b.Namespace, b.ServiceAccount, len(scopes))
+			u.Info("binding %s/%s: created (%d scope(s))", b.Namespace, b.ServiceAccount, len(scopes))
 		case actionUnchanged:
-			fmt.Printf("binding %s/%s: unchanged\n", b.Namespace, b.ServiceAccount)
+			u.Info("binding %s/%s: unchanged", b.Namespace, b.ServiceAccount)
 		default: // actionUpdate
 			if _, err := vc.UpdateWorkloadBinding(existing.ID, b.Namespace, b.ServiceAccount, true, scopes); err != nil {
 				return fmt.Errorf("failed to update workload binding %s/%s: %w", b.Namespace, b.ServiceAccount, err)
 			}
-			fmt.Printf("binding %s/%s: updated (%d scope(s))\n", b.Namespace, b.ServiceAccount, len(scopes))
+			u.Info("binding %s/%s: updated (%d scope(s))", b.Namespace, b.ServiceAccount, len(scopes))
 		}
 	}
 
 	if clusterApplyPrune {
-		if err := pruneBindings(vc, issuer, existingBindings, desiredKeys); err != nil {
+		toPrune := bindingsToPrune(issuer, existingBindings, desiredKeys)
+		if len(toPrune) > 0 && !clusterApplyYes {
+			u.Warn("--prune will delete %d workload binding(s) on issuer %q that are absent from the file.", len(toPrune), issuer.DisplayName)
+			if !u.Confirm("Proceed with pruning these bindings?") {
+				return nil
+			}
+		}
+		if err := pruneBindings(vc, u, issuer, toPrune); err != nil {
 			return err
 		}
 	}
@@ -241,10 +251,10 @@ func bindingKey(namespace, serviceAccount string) string {
 	return namespace + "\x00" + serviceAccount
 }
 
-// pruneBindings deletes workload bindings on the given issuer that are absent
-// from the desired set. Per the no-silent-failures rule, every drop is logged to
-// stderr and a delete error aborts the prune rather than being swallowed.
-func pruneBindings(vc *client.KagiClient, issuer *client.ClusterIssuer, existing []client.WorkloadBinding, desiredKeys map[string]bool) error {
+// bindingsToPrune returns the workload bindings on the given issuer that are
+// absent from the desired set — the bindings a --prune run would delete.
+func bindingsToPrune(issuer *client.ClusterIssuer, existing []client.WorkloadBinding, desiredKeys map[string]bool) []client.WorkloadBinding {
+	var out []client.WorkloadBinding
 	for i := range existing {
 		b := existing[i]
 		if b.ClusterIssuerID != issuer.ID {
@@ -253,12 +263,22 @@ func pruneBindings(vc *client.KagiClient, issuer *client.ClusterIssuer, existing
 		if desiredKeys[bindingKey(b.Namespace, b.ServiceAccount)] {
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "prune: deleting workload binding %s/%s (id %s) on issuer %q — absent from apply file\n",
-			b.Namespace, b.ServiceAccount, b.ID, issuer.DisplayName)
+		out = append(out, b)
+	}
+	return out
+}
+
+// pruneBindings deletes the given workload bindings. Per the no-silent-failures
+// rule, every drop is logged to stderr and a delete error aborts the prune
+// rather than being swallowed.
+func pruneBindings(vc *client.KagiClient, u *ui.UI, issuer *client.ClusterIssuer, toPrune []client.WorkloadBinding) error {
+	for i := range toPrune {
+		b := toPrune[i]
+		u.Info("binding %s/%s (id %s): pruning — absent from apply file", b.Namespace, b.ServiceAccount, b.ID)
 		if err := vc.DeleteWorkloadBinding(b.ID); err != nil {
 			return fmt.Errorf("prune: failed to delete workload binding %s/%s: %w", b.Namespace, b.ServiceAccount, err)
 		}
-		fmt.Printf("binding %s/%s: pruned\n", b.Namespace, b.ServiceAccount)
+		u.Info("binding %s/%s: pruned", b.Namespace, b.ServiceAccount)
 	}
 	return nil
 }

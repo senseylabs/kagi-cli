@@ -281,4 +281,35 @@ func addSecretFlags(cmd *cobra.Command) {
 	cmd.Flags().String("app-id", "", "App ID — the stable machine binding (overrides --path and kagi.yaml)")
 	cmd.Flags().StringP("env", "e", "", "Environment slug (overrides kagi.yaml)")
 	cmd.Flags().Bool("personal", false, "Target your personal environment (sugar for --env personal)")
+
+	// --env completes to the resolved app's environment slugs. Registered here so
+	// every folder-model command that takes --env gets it uniformly.
+	_ = cmd.RegisterFlagCompletionFunc("env", completeEnvSlugs)
+}
+
+// completeEnvSlugs offers the environment slugs of the resolved app for --env
+// shell completion, reusing the folder/app resolution and the ListEnvironments
+// call. Any failure (unauthenticated, unresolvable app, network) yields no
+// suggestions rather than an error.
+func completeEnvSlugs(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if err := requireAuth(); err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	vc, err := client.NewKagiClient(cfgAPIURL, cfgIssuer)
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	appID, _, err := resolveAppOnly(cmd, vc)
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	envs, err := vc.ListEnvironments(appID)
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	slugs := make([]string, 0, len(envs))
+	for _, e := range envs {
+		slugs = append(slugs, e.Slug)
+	}
+	return slugs, cobra.ShellCompDirectiveNoFileComp
 }

@@ -4,34 +4,49 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/senseylabs/kagi-cli/internal/client"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
-var (
-	pullOutput string
-	pullFormat string
-)
+var pullOutFile string
 
 var pullCmd = &cobra.Command{
 	Use:   "pull",
 	Short: "Fetch secrets as KEY=VALUE pairs",
-	Long:  "Fetches secrets from Kagi for a given app and environment. Outputs as KEY=VALUE to stdout or to a file.",
+	Long:  "Fetches secrets from Kagi for a given app and environment. Outputs as KEY=VALUE (env), JSON, or YAML to stdout or to a file.",
+	Args:  cobra.NoArgs,
 	RunE:  runPull,
 }
 
 func init() {
 	addSecretFlags(pullCmd)
-	pullCmd.Flags().StringVar(&pullOutput, "output", "", "Output file path (writes .env file)")
-	pullCmd.Flags().StringVar(&pullFormat, "format", "env", "Output format: env or json")
+	pullCmd.Flags().StringVar(&pullOutFile, "out-file", "", "Write output to this file (0600) instead of stdout")
 	rootCmd.AddCommand(pullCmd)
 }
 
 func runPull(cmd *cobra.Command, args []string) error {
 	if err := requireAuth(); err != nil {
 		return err
+	}
+
+	u := newUI()
+
+	// Resolve the output format up front (pre-flight), before any network call, so
+	// a typo fails instantly rather than after fetching secrets. pull has no table
+	// view, so the global -o default (unset) means env; an explicit -o must name
+	// one of env|json|yaml.
+	format := "env"
+	if cmd.Flags().Changed("output") {
+		format = strings.ToLower(strings.TrimSpace(outputValue))
+	}
+	switch format {
+	case "env", "json", "yaml":
+	default:
+		return fmt.Errorf("unsupported format %q (use 'env', 'json', or 'yaml')", outputValue)
 	}
 
 	vc, err := client.NewKagiClient(cfgAPIURL, cfgIssuer)
@@ -55,33 +70,43 @@ func runPull(cmd *cobra.Command, args []string) error {
 
 	// Format output
 	var output string
-	switch pullFormat {
+	switch format {
 	case "json":
 		data, err := json.MarshalIndent(secrets, "", "  ")
 		if err != nil {
 			return fmt.Errorf("failed to marshal JSON: %w", err)
 		}
+		output = string(data) + "\n"
+	case "yaml":
+		data, err := yaml.Marshal(secrets)
+		if err != nil {
+			return fmt.Errorf("failed to marshal YAML: %w", err)
+		}
 		output = string(data)
 	case "env":
+		// Emit keys in a deterministic (sorted) order so repeated pulls diff cleanly.
+		keys := make([]string, 0, len(secrets))
+		for k := range secrets {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
 		var sb strings.Builder
-		for key, value := range secrets {
-			sb.WriteString(fmt.Sprintf("%s=\"%s\"\n", key, escapeEnvValue(value)))
+		for _, k := range keys {
+			sb.WriteString(fmt.Sprintf("%s=\"%s\"\n", k, escapeEnvValue(secrets[k])))
 		}
 		output = sb.String()
-	default:
-		return fmt.Errorf("unsupported format: %s (use 'env' or 'json')", pullFormat)
 	}
 
 	// Write output
-	if pullOutput != "" {
-		if err := os.WriteFile(pullOutput, []byte(output), 0600); err != nil {
-			return fmt.Errorf("failed to write to %s: %w", pullOutput, err)
+	if pullOutFile != "" {
+		if err := os.WriteFile(pullOutFile, []byte(output), 0600); err != nil {
+			return fmt.Errorf("failed to write to %s: %w", pullOutFile, err)
 		}
-		fmt.Fprintf(os.Stderr, "Secrets written to %s\n", pullOutput)
-	} else {
-		fmt.Print(output)
+		u.Success("Secrets written to %s.", pullOutFile)
+		return nil
 	}
 
+	fmt.Fprint(u.Out(), output)
 	return nil
 }
 

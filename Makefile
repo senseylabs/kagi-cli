@@ -7,20 +7,26 @@ BINARY_NAME=kagi
 # `make build` produces a recognizable non-"dev" local binary; don't rely on it
 # for released version numbers.
 VERSION?=0.1.0
+# COMMIT and DATE stamp `kagi version` (the plain `--version` output stays just
+# the version string). Derived from git/date when unset; overridable for
+# reproducible builds. goreleaser injects its own values on a real release.
+COMMIT?=$(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+DATE?=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS=-X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
 build:
-	go build -ldflags "-X main.version=$(VERSION)" -o bin/$(BINARY_NAME) .
+	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY_NAME) .
 
 build-all: build-darwin-arm64 build-darwin-amd64 build-linux-amd64
 
 build-darwin-arm64:
-	GOOS=darwin GOARCH=arm64 go build -ldflags "-X main.version=$(VERSION)" -o bin/$(BINARY_NAME)-darwin-arm64 .
+	GOOS=darwin GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY_NAME)-darwin-arm64 .
 
 build-darwin-amd64:
-	GOOS=darwin GOARCH=amd64 go build -ldflags "-X main.version=$(VERSION)" -o bin/$(BINARY_NAME)-darwin-amd64 .
+	GOOS=darwin GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY_NAME)-darwin-amd64 .
 
 build-linux-amd64:
-	GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=$(VERSION)" -o bin/$(BINARY_NAME)-linux-amd64 .
+	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY_NAME)-linux-amd64 .
 
 # Test both modules: the root module and the separate sdk/ module.
 test:

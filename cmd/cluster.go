@@ -1,16 +1,16 @@
 package cmd
 
 import (
-	"bufio"
 	"fmt"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/senseylabs/kagi-cli/internal/client"
 	"github.com/senseylabs/kagi-cli/internal/kube"
+	"github.com/senseylabs/kagi-cli/internal/ui"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -20,10 +20,10 @@ var clusterCmd = &cobra.Command{
 	Short: "Register Kubernetes clusters with Kagi workload identity",
 	Long: "Register a Kubernetes cluster's OIDC issuer with Kagi so its workloads can\n" +
 		"authenticate to Kagi with their projected service-account tokens.\n\n" +
-		"  kagi cluster register --context prod    register the current/selected cluster (auto-detects the issuer URL)\n" +
+		"  kagi cluster create --context prod      register the current/selected cluster (auto-detects the issuer URL)\n" +
 		"  kagi cluster list                       list registered cluster issuers\n" +
 		"  kagi cluster update <id|url> --name x   update a cluster issuer's name, JWKS, or enabled flag\n" +
-		"  kagi cluster rm <id|url>                remove a cluster issuer\n" +
+		"  kagi cluster delete <id|url>            remove a cluster issuer\n" +
 		"  kagi cluster apply -f trust.yaml        reconcile issuers + workload bindings declaratively\n\n" +
 		"Credential: log in with 'kagi login' as a user in an org ADMIN/OWNER role. These\n" +
 		"writes require an active org: run 'kagi org use <slug>' first.",
@@ -39,10 +39,11 @@ var (
 )
 
 var clusterRegisterCmd = &cobra.Command{
-	Use:   "register",
-	Short: "Register a cluster OIDC issuer (idempotent)",
-	Long: "Register a Kubernetes cluster's OIDC issuer with Kagi. Idempotent: if an issuer\n" +
-		"with the same URL is already registered, it is left unchanged.\n\n" +
+	Use:     "create",
+	Aliases: []string{"register"},
+	Short:   "Register a cluster OIDC issuer (idempotent upsert)",
+	Long: "Register a Kubernetes cluster's OIDC issuer with Kagi. Idempotent upsert: if an\n" +
+		"issuer with the same URL is already registered, it is left unchanged.\n\n" +
 		"Run with no flags on an interactive terminal to pick a kubeconfig context from a\n" +
 		"list; the issuer URL and cluster type are then auto-detected for you. Passing any\n" +
 		"flag (or running non-interactively, e.g. in CI) uses the flag-driven flow instead.\n\n" +
@@ -82,7 +83,7 @@ var clusterUpdateCmd = &cobra.Command{
 		"  --static-jwks-file <path>  pin a static JWKS from a file (private clusters)\n" +
 		"  --detect-jwks              pin the JWKS detected from the cluster via kubectl\n" +
 		"  --clear-jwks               clear the pinned JWKS and revert to OIDC discovery\n" +
-		"  --enabled / --disable      trust or stop trusting the issuer for token exchange\n" +
+		"  --enable / --disable       trust or stop trusting the issuer for token exchange\n" +
 		"  --type <platform>          set the platform (AKS, EKS, GKE, OPENSHIFT, K3S, GENERIC)",
 	Args: cobra.ExactArgs(1),
 	RunE: runClusterUpdate,
@@ -93,16 +94,19 @@ var clusterUpdateClearJwks bool
 var clusterRmYes bool
 
 var clusterRmCmd = &cobra.Command{
-	Use:   "rm <ID_OR_URL>",
-	Short: "Remove a cluster issuer",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runClusterRm,
+	Use:               "delete <ID_OR_URL>",
+	Aliases:           []string{"rm"},
+	Short:             "Remove a cluster issuer",
+	Args:              cobra.ExactArgs(1),
+	ValidArgsFunction: completeClusterIssuers,
+	RunE:              runClusterRm,
 }
 
 var (
 	clusterApplyFile    string
 	clusterApplyContext string
 	clusterApplyPrune   bool
+	clusterApplyYes     bool
 )
 
 var clusterApplyCmd = &cobra.Command{
@@ -124,22 +128,27 @@ func init() {
 	clusterRegisterCmd.Flags().BoolVar(&clusterRegisterDetectJwks, "detect-jwks", false, "Detect the JWKS from the cluster via kubectl (for private clusters)")
 	clusterRegisterCmd.Flags().StringVar(&clusterRegisterContext, "context", "", "kubectl context to use for auto-detection")
 	clusterRegisterCmd.Flags().StringVar(&clusterRegisterType, "type", "", "Cluster platform: AKS, EKS, GKE, OPENSHIFT, K3S, or GENERIC (auto-detected from the issuer URL if omitted)")
+	clusterRegisterCmd.MarkFlagsMutuallyExclusive("static-jwks-file", "detect-jwks")
 
 	clusterUpdateCmd.Flags().StringVar(&clusterUpdateName, "name", "", "New display name for the cluster issuer")
 	clusterUpdateCmd.Flags().StringVar(&clusterUpdateJwksFile, "static-jwks-file", "", "Path to a static JWKS JSON file to pin (for private clusters)")
 	clusterUpdateCmd.Flags().BoolVar(&clusterUpdateDetectJwks, "detect-jwks", false, "Detect and pin the JWKS from the cluster via kubectl")
 	clusterUpdateCmd.Flags().BoolVar(&clusterUpdateClearJwks, "clear-jwks", false, "Clear the pinned JWKS and revert to OIDC discovery")
 	clusterUpdateCmd.Flags().StringVar(&clusterUpdateContext, "context", "", "kubectl context to use for JWKS detection")
-	clusterUpdateCmd.Flags().BoolVar(&clusterUpdateEnable, "enabled", false, "Trust the issuer for token exchange")
+	clusterUpdateCmd.Flags().BoolVar(&clusterUpdateEnable, "enable", false, "Trust the issuer for token exchange")
 	clusterUpdateCmd.Flags().BoolVar(&clusterUpdateDisable, "disable", false, "Stop trusting the issuer for token exchange")
 	clusterUpdateCmd.Flags().StringVar(&clusterUpdateType, "type", "", "Set the cluster platform: AKS, EKS, GKE, OPENSHIFT, K3S, or GENERIC")
 	clusterUpdateCmd.Flags().BoolVarP(&clusterUpdateYes, "yes", "y", false, "Skip confirmation prompt")
+	clusterUpdateCmd.MarkFlagsMutuallyExclusive("static-jwks-file", "detect-jwks", "clear-jwks")
+	clusterUpdateCmd.MarkFlagsMutuallyExclusive("enable", "disable")
+	clusterUpdateCmd.ValidArgsFunction = completeClusterIssuers
 
 	clusterRmCmd.Flags().BoolVarP(&clusterRmYes, "yes", "y", false, "Skip confirmation prompt")
 
 	clusterApplyCmd.Flags().StringVarP(&clusterApplyFile, "file", "f", "", "Path to the trust YAML file (required)")
 	clusterApplyCmd.Flags().StringVar(&clusterApplyContext, "context", "", "kubectl context to use for auto-detection")
 	clusterApplyCmd.Flags().BoolVar(&clusterApplyPrune, "prune", false, "Delete this issuer's workload bindings that are absent from the file")
+	clusterApplyCmd.Flags().BoolVarP(&clusterApplyYes, "yes", "y", false, "Skip the confirmation prompt before pruning")
 	_ = clusterApplyCmd.MarkFlagRequired("file")
 
 	clusterCmd.AddCommand(clusterRegisterCmd)
@@ -374,13 +383,55 @@ func registerFlagsProvided(cmd *cobra.Command) bool {
 	return false
 }
 
-// printRegisterResult reports the outcome of an idempotent register.
-func printRegisterResult(issuer *client.ClusterIssuer, created bool) {
+// printRegisterResult reports the outcome of an idempotent register to stderr.
+func printRegisterResult(u *ui.UI, issuer *client.ClusterIssuer, created bool) {
 	if created {
-		fmt.Printf("Registered cluster issuer %q (%s).\n", issuer.DisplayName, issuer.IssuerURL)
+		u.Success("Registered cluster issuer %q (%s).", issuer.DisplayName, issuer.IssuerURL)
 	} else {
-		fmt.Printf("Cluster issuer %q is already registered (%s) — unchanged.\n", issuer.DisplayName, issuer.IssuerURL)
+		u.Info("Cluster issuer %q is already registered (%s) — unchanged.", issuer.DisplayName, issuer.IssuerURL)
 	}
+}
+
+// issuerShortLabel returns a compact, human identifier for a cluster issuer —
+// its display name when set, otherwise the issuer URL's host — so confirmation
+// prompts don't echo the full OIDC URL.
+func issuerShortLabel(issuer *client.ClusterIssuer) string {
+	if strings.TrimSpace(issuer.DisplayName) != "" {
+		return issuer.DisplayName
+	}
+	if u, err := url.Parse(issuer.IssuerURL); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return issuer.IssuerURL
+}
+
+// completeClusterIssuers is the dynamic shell-completion for a cluster-issuer
+// reference argument (id or URL). It offers each registered issuer's id with its
+// display name as the completion description; failures degrade to no completion.
+func completeClusterIssuers(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) != 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	if err := requireAuth(); err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	vc, err := client.NewKagiClient(cfgAPIURL, cfgIssuer)
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	issuers, err := vc.ListClusterIssuers()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	out := make([]string, 0, len(issuers))
+	for _, is := range issuers {
+		if is.DisplayName != "" {
+			out = append(out, fmt.Sprintf("%s\t%s", is.ID, is.DisplayName))
+		} else {
+			out = append(out, is.ID)
+		}
+	}
+	return out, cobra.ShellCompDirectiveNoFileComp
 }
 
 func runClusterRegister(cmd *cobra.Command, args []string) error {
@@ -404,15 +455,13 @@ func runClusterRegister(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if clusterRegisterJwksFile != "" && clusterRegisterDetectJwks {
-		return fmt.Errorf("use either --static-jwks-file or --detect-jwks, not both")
-	}
+	u := newUI()
 
 	// Interactive picker: the default when run on a TTY with no register flags set.
 	// Any flag present, or a non-TTY stdin (pipe/CI), keeps the flag-driven flow —
 	// backward compatible and CI-safe.
 	if !registerFlagsProvided(cmd) && term.IsTerminal(int(os.Stdin.Fd())) {
-		return runClusterRegisterInteractive(vc)
+		return runClusterRegisterInteractive(u, vc)
 	}
 
 	issuerURL, name, jwks, resolvedType, err := resolveClusterIssuerInput(
@@ -427,7 +476,7 @@ func runClusterRegister(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	printRegisterResult(issuer, created)
+	printRegisterResult(u, issuer, created)
 	return nil
 }
 
@@ -437,11 +486,11 @@ func runClusterRegister(cmd *cobra.Command, args []string) error {
 // register idempotently. If context enumeration is unavailable (no kubectl, empty
 // kubeconfig) it prints an actionable message and falls back to the flag-driven
 // auto-detect-on-current-context flow rather than hard-failing.
-func runClusterRegisterInteractive(vc *client.KagiClient) error {
+func runClusterRegisterInteractive(u *ui.UI, vc *client.KagiClient) error {
 	contexts, err := kube.ListContexts()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "interactive registration unavailable: %v\n", err)
-		fmt.Fprintln(os.Stderr, "Falling back to auto-detection on the current kubectl context.")
+		u.Warn("Interactive registration unavailable: %v", err)
+		u.Info("Falling back to auto-detection on the current kubectl context.")
 
 		issuerURL, name, jwks, resolvedType, rerr := resolveClusterIssuerInput(
 			clusterRegisterIssuerURL, clusterRegisterName, clusterRegisterJwksFile,
@@ -453,7 +502,7 @@ func runClusterRegisterInteractive(vc *client.KagiClient) error {
 		if rerr != nil {
 			return rerr
 		}
-		printRegisterResult(issuer, created)
+		printRegisterResult(u, issuer, created)
 		return nil
 	}
 
@@ -510,12 +559,17 @@ func runClusterRegisterInteractive(vc *client.KagiClient) error {
 		return err
 	}
 
-	printRegisterResult(issuer, created)
+	printRegisterResult(u, issuer, created)
 	return nil
 }
 
 func runClusterList(cmd *cobra.Command, args []string) error {
 	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	format, err := outputFormat()
+	if err != nil {
 		return err
 	}
 
@@ -529,13 +583,18 @@ func runClusterList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to list cluster issuers: %w", err)
 	}
 
-	if len(issuers) == 0 {
-		fmt.Println("No cluster issuers registered.")
+	u := newUI()
+	if len(issuers) == 0 && format == ui.FormatTable {
+		u.Info("No cluster issuers registered.")
 		return nil
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "DISPLAY NAME\tISSUER URL\tTYPE\tENABLED\tJWKS\tID")
+	// The wide, low-value columns — the issuer URL and the UUID id — are marked
+	// truncatable so rows stay one line on a narrow terminal; the full values are
+	// always available via -o json/yaml (piped output is never truncated).
+	table := ui.NewTable("DISPLAY NAME", "ISSUER URL", "TYPE", "ENABLED", "JWKS", "ID")
+	table.SetTruncatable(1, 0)
+	table.SetTruncatable(5, 1)
 	for _, issuer := range issuers {
 		jwks := "auto"
 		if strings.TrimSpace(issuer.StaticJwks) != "" {
@@ -545,9 +604,10 @@ func runClusterList(cmd *cobra.Command, args []string) error {
 		if clusterType == "" {
 			clusterType = string(kube.ClusterTypeGeneric)
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%t\t%s\t%s\n", issuer.DisplayName, issuer.IssuerURL, clusterType, issuer.Enabled, jwks, issuer.ID)
+		table.AddRow(issuer.DisplayName, issuer.IssuerURL, clusterType, fmt.Sprintf("%t", issuer.Enabled), jwks, issuer.ID)
 	}
-	return w.Flush()
+
+	return u.Print(format, issuers, table)
 }
 
 func runClusterRm(cmd *cobra.Command, args []string) error {
@@ -565,16 +625,9 @@ func runClusterRm(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	u := newUI()
 	if !clusterRmYes {
-		fmt.Printf("Are you sure you want to remove cluster issuer %q (%s)? [y/N]: ", issuer.DisplayName, issuer.IssuerURL)
-		reader := bufio.NewReader(os.Stdin)
-		input, err := reader.ReadString('\n')
-		if err != nil {
-			return fmt.Errorf("failed to read input: %w", err)
-		}
-		input = strings.TrimSpace(strings.ToLower(input))
-		if input != "y" && input != "yes" {
-			fmt.Println("Aborted.")
+		if !u.Confirm(fmt.Sprintf("Remove cluster issuer %q?", issuerShortLabel(issuer))) {
 			return nil
 		}
 	}
@@ -583,32 +636,13 @@ func runClusterRm(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to remove cluster issuer %q: %w", issuer.DisplayName, err)
 	}
 
-	fmt.Printf("Removed cluster issuer %q.\n", issuer.DisplayName)
+	u.Success("Removed cluster issuer %q.", issuer.DisplayName)
 	return nil
 }
 
 func runClusterUpdate(cmd *cobra.Command, args []string) error {
 	if err := requireAuth(); err != nil {
 		return err
-	}
-
-	// Reject conflicting JWKS sources and enabled flags up front, mirroring the
-	// register command's mutual-exclusion checks.
-	jwksSources := 0
-	if clusterUpdateJwksFile != "" {
-		jwksSources++
-	}
-	if clusterUpdateDetectJwks {
-		jwksSources++
-	}
-	if clusterUpdateClearJwks {
-		jwksSources++
-	}
-	if jwksSources > 1 {
-		return fmt.Errorf("use only one of --static-jwks-file, --detect-jwks, or --clear-jwks")
-	}
-	if clusterUpdateEnable && clusterUpdateDisable {
-		return fmt.Errorf("use either --enabled or --disable, not both")
 	}
 
 	// Validate --type up front (before any network call) so an invalid value fails
@@ -667,21 +701,14 @@ func runClusterUpdate(cmd *cobra.Command, args []string) error {
 		desiredType = string(explicitType)
 	}
 
+	u := newUI()
 	if decideIssuerAction(issuer, desiredName, desiredJwks, desiredEnabled, desiredType) == issuerActionUnchanged {
-		fmt.Printf("Cluster issuer %q is already up to date — unchanged.\n", issuer.DisplayName)
+		u.Info("Cluster issuer %q is already up to date — unchanged.", issuer.DisplayName)
 		return nil
 	}
 
 	if !clusterUpdateYes {
-		fmt.Printf("Update cluster issuer %q (%s)? [y/N]: ", issuer.DisplayName, issuer.IssuerURL)
-		reader := bufio.NewReader(os.Stdin)
-		input, rerr := reader.ReadString('\n')
-		if rerr != nil {
-			return fmt.Errorf("failed to read input: %w", rerr)
-		}
-		input = strings.TrimSpace(strings.ToLower(input))
-		if input != "y" && input != "yes" {
-			fmt.Println("Aborted.")
+		if !u.Confirm(fmt.Sprintf("Update cluster issuer %q?", issuerShortLabel(issuer))) {
 			return nil
 		}
 	}
@@ -691,6 +718,6 @@ func runClusterUpdate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to update cluster issuer %q: %w", issuer.DisplayName, err)
 	}
 
-	fmt.Printf("Updated cluster issuer %q (%s).\n", updated.DisplayName, updated.IssuerURL)
+	u.Success("Updated cluster issuer %q (%s).", updated.DisplayName, updated.IssuerURL)
 	return nil
 }

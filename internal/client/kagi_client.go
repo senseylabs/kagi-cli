@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	kagi "github.com/senseylabs/kagi-sdk"
@@ -480,6 +482,46 @@ func (c *KagiClient) CreateCertificate(name, certContent, keyContent string) (*C
 	return &resp.Data, nil
 }
 
+// certificateFolderItemsPath builds the folder-model certificates items URL for
+// a folder path, escaping each path segment. A "/" or empty folderPath addresses
+// the certificates root, where the wildcard suffix is empty and the URL ends at
+// .../items with no trailing segment.
+func certificateFolderItemsPath(folderPath string) string {
+	base := "/kagi/folders/certificates/items"
+	trimmed := strings.Trim(folderPath, "/")
+	if trimmed == "" {
+		return base
+	}
+	segments := strings.Split(trimmed, "/")
+	for i, seg := range segments {
+		segments[i] = url.PathEscape(seg)
+	}
+	return base + "/" + strings.Join(segments, "/")
+}
+
+// CreateCertificateInFolder creates a certificate inside the certificate folder
+// addressed by folderPath. A "/" or empty folderPath targets the root. The body
+// mirrors CreateCertificate; the response parses the same CertificateDetail.
+func (c *KagiClient) CreateCertificateInFolder(folderPath, name, certContent, keyContent string) (*CertificateDetail, error) {
+	payload := map[string]string{
+		"name":               name,
+		"certificateContent": certContent,
+		"privateKeyContent":  keyContent,
+	}
+
+	body, err := c.doRequestWithBody("POST", certificateFolderItemsPath(folderPath), payload)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp kagi.APIResponse[CertificateDetail]
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse create certificate response: %w", err)
+	}
+
+	return &resp.Data, nil
+}
+
 // UpdateCertificate updates an existing certificate's content.
 func (c *KagiClient) UpdateCertificate(certID, certContent, keyContent string) (*CertificateDetail, error) {
 	payload := map[string]string{
@@ -503,5 +545,47 @@ func (c *KagiClient) UpdateCertificate(certID, certContent, keyContent string) (
 // DeleteCertificate deletes a certificate by ID.
 func (c *KagiClient) DeleteCertificate(certID string) error {
 	_, err := c.doRequest("DELETE", fmt.Sprintf("/kagi/certificates/%s", certID))
+	return err
+}
+
+// ---------------------------------------------------------------------------
+// Access token operations (read/revoke only — creation is deliberately absent)
+// ---------------------------------------------------------------------------
+
+// AccessToken is a Kagi personal access token as returned by the folder-addressed
+// list endpoint. The token hash/plaintext is never exposed. FolderID is empty for
+// a token not yet folder-addressed, and ExpiresAt is empty for a token that never
+// expires.
+type AccessToken struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	CreatedByID string `json:"createdById"`
+	TokenType   string `json:"tokenType"`
+	FolderID    string `json:"folderId"`
+	ExpiresAt   string `json:"expiresAt"`
+	CreatedAt   string `json:"createdAt"`
+}
+
+// ListAccessTokens returns the caller's access tokens. An explicit large page
+// size is sent because the backend paginates with a default of 20; without it,
+// the list would be truncated to the first page.
+func (c *KagiClient) ListAccessTokens() ([]AccessToken, error) {
+	body, err := c.doRequest("GET", "/kagi/folders/access-tokens/items/?size=1000")
+	if err != nil {
+		return nil, err
+	}
+
+	var resp kagi.APIResponse[[]AccessToken]
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse access tokens list response: %w", err)
+	}
+
+	return resp.Data, nil
+}
+
+// RevokeAccessToken revokes (soft-deletes) an access token by its stable id.
+// There is deliberately no create counterpart — tokens are read/delete only.
+func (c *KagiClient) RevokeAccessToken(id string) error {
+	_, err := c.doRequest("DELETE", "/kagi/folders/access-tokens/by-id/"+url.PathEscape(id))
 	return err
 }

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -9,33 +10,46 @@ import (
 
 	"github.com/senseylabs/kagi-cli/internal/client"
 	"github.com/senseylabs/kagi-cli/internal/config"
+	"github.com/senseylabs/kagi-cli/internal/ui"
 	"github.com/spf13/cobra"
 )
 
 var (
-	setupPath  string
-	setupEnv   string
-	setupForce bool
+	setupPath string
+	setupEnv  string
+	setupYes  bool
 )
+
+// errSetupAborted signals a clean, user-requested abort of interactive setup —
+// 'q' at the folder browser or declining the overwrite prompt. runSetup treats
+// it as a clean exit (nil), so the two interactive aborts behave identically
+// instead of one returning nil and the other an error.
+var errSetupAborted = errors.New("setup aborted")
 
 var setupCmd = &cobra.Command{
 	Use:   "setup",
 	Short: "Bind the current directory to a Kagi app and environment",
 	Long: "Resolve a secrets folder/app path to the app's stable internal ID and write a\n" +
 		"kagi.yaml binding (app-id + environment) to the current directory. Addressing\n" +
-		"thereafter uses the app ID, which survives app renames and folder moves.\n\n" +
-		"Pass --path and --env to skip the interactive folder browser.",
+		"thereafter uses the app ID, which survives app renames and folder moves.",
+	Example: "  # Browse interactively for the app and environment\n" +
+		"  kagi setup\n\n" +
+		"  # Skip the interactive browser\n" +
+		"  kagi setup --path /village/kaizen --env prod",
+	Args: cobra.NoArgs,
 	RunE: runSetup,
 }
 
 func init() {
 	setupCmd.Flags().StringVarP(&setupPath, "path", "p", "", "Folder/app path, e.g. /village/kaizen (skip interactive browse)")
 	setupCmd.Flags().StringVarP(&setupEnv, "env", "e", "", "Environment slug (skip interactive selection)")
-	setupCmd.Flags().BoolVarP(&setupForce, "force", "f", false, "Overwrite existing kagi.yaml")
+	setupCmd.Flags().BoolVarP(&setupYes, "yes", "y", false, "Overwrite an existing kagi.yaml without prompting")
 	rootCmd.AddCommand(setupCmd)
 }
 
 func runSetup(cmd *cobra.Command, args []string) error {
+	u := newUI()
+
 	if err := requireAuth(); err != nil {
 		return err
 	}
@@ -48,8 +62,13 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	// Step 1: resolve the folder/app path — from --path or by browsing the tree.
 	folderPath := setupPath
 	if folderPath == "" {
-		folderPath, err = browseForApp(vc)
+		folderPath, err = browseForApp(u, vc)
 		if err != nil {
+			// A user-requested abort ('q') is a clean exit, matching a declined
+			// overwrite prompt — not an error.
+			if errors.Is(err, errSetupAborted) {
+				return nil
+			}
 			return err
 		}
 	}
@@ -72,7 +91,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 	envSlug := setupEnv
 	if envSlug == "" {
-		envSlug, err = selectEnvironment(envs)
+		envSlug, err = selectEnvironment(u, envs)
 		if err != nil {
 			return err
 		}
@@ -92,12 +111,10 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	}
 
 	// Step 4: write kagi.yaml.
-	if _, statErr := os.Stat("kagi.yaml"); statErr == nil && !setupForce {
-		fmt.Print("Configuration kagi.yaml already exists. Overwrite? [y/N]: ")
-		reader := bufio.NewReader(os.Stdin)
-		input, _ := reader.ReadString('\n')
-		if strings.TrimSpace(strings.ToLower(input)) != "y" {
-			fmt.Println("Aborted.")
+	if _, statErr := os.Stat("kagi.yaml"); statErr == nil && !setupYes {
+		// Confirm prints "Aborted." on a decline; a declined overwrite is a clean
+		// exit, matching a 'q' abort in the browser.
+		if !u.Confirm("Configuration kagi.yaml already exists. Overwrite?") {
 			return nil
 		}
 	}
@@ -106,7 +123,10 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	fmt.Printf("Configuration saved to kagi.yaml.\n  Folder path: %s\n  App ID:      %s\n  Environment: %s\n", folderPath, appID, envSlug)
+	u.Success("configuration saved to kagi.yaml")
+	u.Info("folder path: %s", folderPath)
+	u.Info("app ID: %s", appID)
+	u.Info("environment: %s", envSlug)
 	return nil
 }
 
@@ -114,7 +134,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 // chosen app's full folder path. At each level the user descends into a child
 // folder or picks an app; picking an app ends the walk. Folder paths are only
 // used to resolve the app ID once — the returned path is informational.
-func browseForApp(vc *client.KagiClient) (string, error) {
+func browseForApp(u *ui.UI, vc *client.KagiClient) (string, error) {
 	reader := bufio.NewReader(os.Stdin)
 	path := "/"
 
@@ -142,64 +162,78 @@ func browseForApp(vc *client.KagiClient) (string, error) {
 			entries = append(entries, entry{isApp: true, name: a.Name, slug: a.Slug})
 		}
 
-		fmt.Printf("\n%s\n", path)
+		// The interactive menu is human-facing, so it goes to stderr, keeping
+		// stdout free of anything a script would consume.
+		fmt.Fprintf(u.Err(), "\n%s\n", path)
 		for i, e := range entries {
 			kind := "folder/"
 			if e.isApp {
 				kind = "app"
 			}
-			fmt.Printf("  %d. %s  (%s)\n", i+1, e.name, kind)
-		}
-		fmt.Print("\nSelect a number (or 'q' to abort): ")
-
-		input, err := reader.ReadString('\n')
-		if err != nil {
-			return "", fmt.Errorf("failed to read input: %w", err)
-		}
-		input = strings.TrimSpace(input)
-		if strings.EqualFold(input, "q") {
-			return "", fmt.Errorf("setup aborted")
+			fmt.Fprintf(u.Err(), "  %d. %s  (%s)\n", i+1, e.name, kind)
 		}
 
-		choice, err := strconv.Atoi(input)
-		if err != nil || choice < 1 || choice > len(entries) {
-			return "", fmt.Errorf("invalid selection: %s", input)
-		}
+		// Re-prompt on an invalid selection rather than aborting the whole setup.
+		for {
+			fmt.Fprint(u.Err(), "\nSelect a number (or 'q' to abort): ")
 
-		chosen := entries[choice-1]
-		path = joinFolderPath(path, chosen.slug)
-		if chosen.isApp {
-			return path, nil
+			input, err := reader.ReadString('\n')
+			if err != nil {
+				return "", fmt.Errorf("failed to read input: %w", err)
+			}
+			input = strings.TrimSpace(input)
+			if strings.EqualFold(input, "q") {
+				fmt.Fprintln(u.Err(), "Aborted.")
+				return "", errSetupAborted
+			}
+
+			choice, err := strconv.Atoi(input)
+			if err != nil || choice < 1 || choice > len(entries) {
+				u.Warn("invalid selection: %s", input)
+				continue
+			}
+
+			chosen := entries[choice-1]
+			path = joinFolderPath(path, chosen.slug)
+			if chosen.isApp {
+				return path, nil
+			}
+			break // descended into a folder; re-list at the new path
 		}
 	}
 }
 
 // selectEnvironment prompts the user to choose an environment, auto-selecting
 // when the app has exactly one.
-func selectEnvironment(envs []client.Environment) (string, error) {
+func selectEnvironment(u *ui.UI, envs []client.Environment) (string, error) {
 	if len(envs) == 1 {
-		fmt.Printf("\nAuto-selected environment: %s (%s)\n", envs[0].Name, envs[0].Slug)
+		u.Info("auto-selected environment: %s (%s)", envs[0].Name, envs[0].Slug)
 		return envs[0].Slug, nil
 	}
 
-	fmt.Println("\nSelect an environment:")
+	fmt.Fprintln(u.Err(), "\nSelect an environment:")
 	for i, e := range envs {
-		fmt.Printf("  %d. %s (%s)\n", i+1, e.Name, e.Slug)
+		fmt.Fprintf(u.Err(), "  %d. %s (%s)\n", i+1, e.Name, e.Slug)
 	}
-	fmt.Print("\nEnter number: ")
 
 	reader := bufio.NewReader(os.Stdin)
-	input, err := reader.ReadString('\n')
-	if err != nil {
-		return "", fmt.Errorf("failed to read input: %w", err)
-	}
-	input = strings.TrimSpace(input)
+	// Re-prompt on an invalid selection rather than aborting.
+	for {
+		fmt.Fprint(u.Err(), "\nEnter number: ")
 
-	choice, err := strconv.Atoi(input)
-	if err != nil || choice < 1 || choice > len(envs) {
-		return "", fmt.Errorf("invalid selection: %s", input)
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			return "", fmt.Errorf("failed to read input: %w", err)
+		}
+		input = strings.TrimSpace(input)
+
+		choice, err := strconv.Atoi(input)
+		if err != nil || choice < 1 || choice > len(envs) {
+			u.Warn("invalid selection: %s", input)
+			continue
+		}
+		return envs[choice-1].Slug, nil
 	}
-	return envs[choice-1].Slug, nil
 }
 
 // joinFolderPath appends a slug to a folder path, yielding an absolute,

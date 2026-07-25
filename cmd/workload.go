@@ -1,14 +1,12 @@
 package cmd
 
 import (
-	"bufio"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/senseylabs/kagi-cli/internal/client"
+	"github.com/senseylabs/kagi-cli/internal/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -17,10 +15,10 @@ var workloadCmd = &cobra.Command{
 	Short: "Manage workload bindings that grant clusters access to app secrets",
 	Long: "Bind a Kubernetes (namespace, service account) on a registered cluster to a set of\n" +
 		"app environments, so that workload's projected tokens can read those secrets.\n\n" +
-		"  kagi workload bind --issuer <id|url> --namespace app --service-account api \\\n" +
+		"  kagi workload create --issuer <id|url> --namespace app --service-account api \\\n" +
 		"      --scope /village/kaizen:prod    grant a service account access to an app env\n" +
 		"  kagi workload list                  list workload bindings\n" +
-		"  kagi workload unbind <id>           remove a workload binding\n\n" +
+		"  kagi workload delete <id>           remove a workload binding\n\n" +
 		"A binding is keyed by (issuer, namespace, service account); binding the same triple\n" +
 		"again replaces its scopes. Each scope's app must belong to the active organization.",
 }
@@ -30,16 +28,18 @@ var (
 	workloadBindNS     string
 	workloadBindSA     string
 	workloadBindScopes []string
-	workloadBindApp    string
+	workloadBindPath   string
 	workloadBindEnv    string
 )
 
 var workloadBindCmd = &cobra.Command{
-	Use:   "bind",
-	Short: "Bind a cluster service account to app environments (idempotent)",
-	Long: "Create or update a workload binding. Idempotent: if a binding already exists for the\n" +
-		"(issuer, namespace, service account) triple, its scopes are replaced with the ones given.\n\n" +
-		"Scopes are given as repeatable --scope <app-path>:<env> flags and/or a single --app/--env\n" +
+	Use:     "create",
+	Aliases: []string{"bind"},
+	Short:   "Bind a cluster service account to app environments (idempotent upsert)",
+	Long: "Create or update a workload binding. Idempotent upsert: if a binding already exists\n" +
+		"for the (issuer, namespace, service account) triple, its scopes are replaced with the\n" +
+		"ones given.\n\n" +
+		"Scopes are given as repeatable --scope <app-path>:<env> flags and/or a single --path/--env\n" +
 		"pair. App paths are resolved to their stable app ID and the environment is validated.",
 	Args: cobra.NoArgs,
 	RunE: runWorkloadBind,
@@ -55,10 +55,12 @@ var workloadListCmd = &cobra.Command{
 var workloadUnbindYes bool
 
 var workloadUnbindCmd = &cobra.Command{
-	Use:   "unbind <ID>",
-	Short: "Remove a workload binding",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runWorkloadUnbind,
+	Use:               "delete <ID>",
+	Aliases:           []string{"unbind"},
+	Short:             "Remove a workload binding",
+	Args:              cobra.ExactArgs(1),
+	ValidArgsFunction: completeWorkloadBindings,
+	RunE:              runWorkloadUnbind,
 }
 
 func init() {
@@ -66,11 +68,12 @@ func init() {
 	workloadBindCmd.Flags().StringVar(&workloadBindNS, "namespace", "", "Kubernetes namespace (required)")
 	workloadBindCmd.Flags().StringVar(&workloadBindSA, "service-account", "", "Kubernetes service account (required)")
 	workloadBindCmd.Flags().StringArrayVar(&workloadBindScopes, "scope", nil, "Scope as <app-path>:<env> (repeatable)")
-	workloadBindCmd.Flags().StringVar(&workloadBindApp, "app", "", "App path for a single scope (use with --env)")
-	workloadBindCmd.Flags().StringVar(&workloadBindEnv, "env", "", "Environment slug for a single scope (use with --app)")
+	workloadBindCmd.Flags().StringVarP(&workloadBindPath, "path", "p", "", "App path for a single scope (use with --env)")
+	workloadBindCmd.Flags().StringVarP(&workloadBindEnv, "env", "e", "", "Environment slug for a single scope (use with --path)")
 	_ = workloadBindCmd.MarkFlagRequired("issuer")
 	_ = workloadBindCmd.MarkFlagRequired("namespace")
 	_ = workloadBindCmd.MarkFlagRequired("service-account")
+	workloadBindCmd.MarkFlagsRequiredTogether("path", "env")
 
 	workloadUnbindCmd.Flags().BoolVarP(&workloadUnbindYes, "yes", "y", false, "Skip confirmation prompt")
 
@@ -220,8 +223,10 @@ func runWorkloadBind(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	u := newUI()
+
 	// Collect scope inputs from the repeatable --scope flags and the single
-	// --app/--env pair.
+	// --path/--env pair (cobra enforces that the pair is used together).
 	inputs := make([]scopeInput, 0, len(workloadBindScopes)+1)
 	for _, raw := range workloadBindScopes {
 		parsed, err := parseScopeFlag(raw)
@@ -230,11 +235,8 @@ func runWorkloadBind(cmd *cobra.Command, args []string) error {
 		}
 		inputs = append(inputs, parsed)
 	}
-	if workloadBindApp != "" || workloadBindEnv != "" {
-		if workloadBindApp == "" || workloadBindEnv == "" {
-			return fmt.Errorf("--app and --env must be used together")
-		}
-		inputs = append(inputs, scopeInput{AppPath: workloadBindApp, Env: workloadBindEnv})
+	if workloadBindPath != "" && workloadBindEnv != "" {
+		inputs = append(inputs, scopeInput{AppPath: workloadBindPath, Env: workloadBindEnv})
 	}
 
 	issuer, err := findClusterIssuer(vc, workloadBindIssuer)
@@ -259,17 +261,17 @@ func runWorkloadBind(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to create workload binding %s/%s: %w", workloadBindNS, workloadBindSA, err)
 		}
-		fmt.Printf("Created workload binding %s/%s on issuer %q (%d scope(s), id %s).\n",
+		u.Success("Created workload binding %s/%s on issuer %q (%d scope(s), id %s).",
 			created.Namespace, created.ServiceAccount, issuer.DisplayName, len(created.Scopes), created.ID)
 	case actionUnchanged:
-		fmt.Printf("Workload binding %s/%s on issuer %q is already up to date — unchanged.\n",
+		u.Info("Workload binding %s/%s on issuer %q is already up to date — unchanged.",
 			existing.Namespace, existing.ServiceAccount, issuer.DisplayName)
 	default: // actionUpdate
 		updated, err := vc.UpdateWorkloadBinding(existing.ID, workloadBindNS, workloadBindSA, true, scopes)
 		if err != nil {
 			return fmt.Errorf("failed to update workload binding %s/%s: %w", workloadBindNS, workloadBindSA, err)
 		}
-		fmt.Printf("Updated workload binding %s/%s on issuer %q (%d scope(s), id %s).\n",
+		u.Success("Updated workload binding %s/%s on issuer %q (%d scope(s), id %s).",
 			updated.Namespace, updated.ServiceAccount, issuer.DisplayName, len(updated.Scopes), updated.ID)
 	}
 	return nil
@@ -277,6 +279,11 @@ func runWorkloadBind(cmd *cobra.Command, args []string) error {
 
 func runWorkloadList(cmd *cobra.Command, args []string) error {
 	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	format, err := outputFormat()
+	if err != nil {
 		return err
 	}
 
@@ -290,18 +297,25 @@ func runWorkloadList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to list workload bindings: %w", err)
 	}
 
-	if len(bindings) == 0 {
-		fmt.Println("No workload bindings.")
+	u := newUI()
+	if len(bindings) == 0 && format == ui.FormatTable {
+		u.Info("No workload bindings.")
 		return nil
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAMESPACE\tSERVICE ACCOUNT\tENABLED\tSCOPES\tISSUER ID\tID")
+	// The wide, low-value UUID columns — the issuer id and the binding id — are
+	// marked truncatable so rows stay one line on a narrow terminal; the full
+	// values are always available via -o json/yaml (piped output is never
+	// truncated).
+	table := ui.NewTable("NAMESPACE", "SERVICE ACCOUNT", "ENABLED", "SCOPES", "ISSUER ID", "ID")
+	table.SetTruncatable(4, 0)
+	table.SetTruncatable(5, 1)
 	for _, b := range bindings {
-		fmt.Fprintf(w, "%s\t%s\t%t\t%s\t%s\t%s\n",
-			b.Namespace, b.ServiceAccount, b.Enabled, formatScopes(b.Scopes), b.ClusterIssuerID, b.ID)
+		table.AddRow(b.Namespace, b.ServiceAccount, fmt.Sprintf("%t", b.Enabled),
+			formatScopes(b.Scopes), b.ClusterIssuerID, b.ID)
 	}
-	return w.Flush()
+
+	return u.Print(format, bindings, table)
 }
 
 // formatScopes renders a binding's scopes as a compact appId:env list for table
@@ -347,17 +361,10 @@ func runWorkloadUnbind(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("workload binding %q not found. List bindings with 'kagi workload list'", bindingID)
 	}
 
+	u := newUI()
 	if !workloadUnbindYes {
-		fmt.Printf("Are you sure you want to remove workload binding %s/%s (id %s)? [y/N]: ",
-			target.Namespace, target.ServiceAccount, target.ID)
-		reader := bufio.NewReader(os.Stdin)
-		input, err := reader.ReadString('\n')
-		if err != nil {
-			return fmt.Errorf("failed to read input: %w", err)
-		}
-		input = strings.TrimSpace(strings.ToLower(input))
-		if input != "y" && input != "yes" {
-			fmt.Println("Aborted.")
+		if !u.Confirm(fmt.Sprintf("Remove workload binding %s/%s (id %s)?",
+			target.Namespace, target.ServiceAccount, target.ID)) {
 			return nil
 		}
 	}
@@ -366,6 +373,31 @@ func runWorkloadUnbind(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to remove workload binding %s/%s: %w", target.Namespace, target.ServiceAccount, err)
 	}
 
-	fmt.Printf("Removed workload binding %s/%s.\n", target.Namespace, target.ServiceAccount)
+	u.Success("Removed workload binding %s/%s.", target.Namespace, target.ServiceAccount)
 	return nil
+}
+
+// completeWorkloadBindings is the dynamic shell-completion for a workload-binding
+// id argument. It offers each binding's id with its namespace/service-account as
+// the completion description; failures degrade to no completion.
+func completeWorkloadBindings(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) != 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	if err := requireAuth(); err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	vc, err := client.NewKagiClient(cfgAPIURL, cfgIssuer)
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	bindings, err := vc.ListWorkloadBindings()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	out := make([]string, 0, len(bindings))
+	for _, b := range bindings {
+		out = append(out, fmt.Sprintf("%s\t%s/%s", b.ID, b.Namespace, b.ServiceAccount))
+	}
+	return out, cobra.ShellCompDirectiveNoFileComp
 }

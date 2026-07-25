@@ -2,17 +2,18 @@ package cmd
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"time"
 
 	"github.com/senseylabs/kagi-cli/internal/auth"
+	"github.com/senseylabs/kagi-cli/internal/config"
+	"github.com/senseylabs/kagi-cli/internal/ui"
 	"github.com/spf13/cobra"
 )
 
 var logoutCmd = &cobra.Command{
 	Use:   "logout",
 	Short: "Log out and clear stored credentials",
+	Args:  cobra.NoArgs,
 	RunE:  runLogout,
 }
 
@@ -21,11 +22,12 @@ func init() {
 }
 
 func runLogout(cmd *cobra.Command, args []string) error {
+	u := newUI()
 	store := auth.NewTokenStore()
 
 	creds, err := store.Load()
 	if err != nil {
-		fmt.Println("You are not logged in.")
+		u.Info("You are not logged in")
 		return nil
 	}
 
@@ -51,23 +53,29 @@ func runLogout(cmd *cobra.Command, args []string) error {
 
 		endpoints, err := deviceFlow.DiscoverEndpoints(discoveryCtx)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: server-side token revocation failed: %v — your tokens remain valid on the server until their lifetime expires\n", err)
+			u.Warn("server-side token revocation failed: %v — your tokens remain valid on the server until their lifetime expires", err)
 		} else if endpoints.RevocationEndpoint == "" {
-			fmt.Fprintf(os.Stderr, "warning: server-side token revocation failed: revocation_endpoint not advertised by issuer — your tokens remain valid on the server until their lifetime expires\n")
+			u.Warn("server-side token revocation failed: revocation_endpoint not advertised by issuer — your tokens remain valid on the server until their lifetime expires")
 		} else {
 			revocationCtx, revocationCancel := context.WithTimeout(context.Background(), revocationTimeout)
 			defer revocationCancel()
 
 			if err := deviceFlow.RevokeToken(revocationCtx, endpoints.RevocationEndpoint, creds.RefreshToken); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: server-side token revocation failed: %v — your tokens remain valid on the server until their lifetime expires\n", err)
+				u.Warn("server-side token revocation failed: %v — your tokens remain valid on the server until their lifetime expires", err)
 			}
 		}
 	}
 
 	if err := store.Delete(); err != nil {
-		return fmt.Errorf("failed to clear credentials: %w", err)
+		return ui.Wrapf(err, "failed to clear credentials")
 	}
 
-	fmt.Println("Logged out successfully.")
+	// Clear any stored organization selection so a later multi-org login does not
+	// inherit a stale org (which would surface as opaque 403s).
+	if err := config.ClearOrganization(); err != nil {
+		u.Warn("could not clear the stored organization selection: %v", err)
+	}
+
+	u.Success("Logged out successfully")
 	return nil
 }

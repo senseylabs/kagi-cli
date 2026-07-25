@@ -106,6 +106,94 @@ func Load() Config {
 	return cfg
 }
 
+// readOrg unmarshals a viper instance into a Config and returns its organization
+// slug and id (both empty when the file sets no organization).
+func readOrg(v *viper.Viper) (slug, id string) {
+	var c Config
+	if err := v.Unmarshal(&c); err != nil {
+		return "", ""
+	}
+	return c.Organization, c.OrganizationID
+}
+
+// HomeOrganization returns the organization slug and id recorded in the home
+// config (~/.kagi/config.yaml). Both are empty when the file is absent or sets
+// no organization. Unlike Load, it ignores any cwd kagi.yaml pin, so callers can
+// distinguish the stored selection from the effective (merged) one.
+func HomeOrganization() (slug, id string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", ""
+	}
+	v := viper.New()
+	v.SetConfigName("config")
+	v.SetConfigType("yaml")
+	v.AddConfigPath(filepath.Join(home, ".kagi"))
+	if err := v.ReadInConfig(); err != nil {
+		return "", ""
+	}
+	return readOrg(v)
+}
+
+// CWDOrganization returns the organization slug and id pinned by a kagi.yaml in
+// the current working directory. Both are empty when there is no such file or it
+// sets no organization. A non-empty result overrides the home selection for
+// commands run in this directory (see Load's precedence).
+func CWDOrganization() (slug, id string) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", ""
+	}
+	v := viper.New()
+	v.SetConfigName("kagi")
+	v.SetConfigType("yaml")
+	v.AddConfigPath(cwd)
+	if err := v.ReadInConfig(); err != nil {
+		return "", ""
+	}
+	return readOrg(v)
+}
+
+// ClearOrganization removes the active-organization selection (both the slug and
+// the UUID) from the home config, preserving every other key. It is a no-op when
+// no home config exists yet. Used on logout, and on login when the stored org is
+// no longer a valid membership, so a stale selection cannot produce opaque 403s.
+func ClearOrganization() error {
+	path, err := homeConfigPath()
+	if err != nil {
+		return err
+	}
+
+	if _, statErr := os.Stat(path); statErr != nil {
+		if os.IsNotExist(statErr) {
+			return nil
+		}
+		return fmt.Errorf("failed to read existing config %s: %w", path, statErr)
+	}
+
+	v := viper.New()
+	v.SetConfigFile(path)
+	if err := v.ReadInConfig(); err != nil {
+		return fmt.Errorf("failed to read existing config %s: %w", path, err)
+	}
+
+	settings := v.AllSettings()
+	delete(settings, "organization")
+	delete(settings, "organization-id")
+
+	// Rewrite from a fresh viper so the removed keys are actually dropped (Set
+	// alone cannot unset a key).
+	out := viper.New()
+	out.SetConfigFile(path)
+	for k, val := range settings {
+		out.Set(k, val)
+	}
+	if err := out.WriteConfigAs(path); err != nil {
+		return fmt.Errorf("failed to write config %s: %w", path, err)
+	}
+	return nil
+}
+
 // homeConfigPath returns the path to ~/.kagi/config.yaml.
 func homeConfigPath() (string, error) {
 	home, err := os.UserHomeDir()

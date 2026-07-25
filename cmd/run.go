@@ -29,6 +29,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	u := newUI()
+
 	// Find the command args after "--"
 	cmdArgs := args
 	if cmd.ArgsLenAtDash() >= 0 {
@@ -62,6 +64,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 	for k, v := range secrets {
 		env = append(env, fmt.Sprintf("%s=%s", k, v))
 	}
+
+	// Status goes to stderr so the child's stdout stays clean for the caller.
+	u.Status("Running %s with %d secret(s) injected.", cmdArgs[0], len(secrets))
 
 	// Execute the command
 	childCmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)

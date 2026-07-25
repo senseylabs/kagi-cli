@@ -46,6 +46,14 @@ var rootCmd = &cobra.Command{
 	Use:   "kagi",
 	Short: "Kagi CLI — secrets management for Sensey",
 	Long:  "A CLI tool for managing secrets in Kagi. Authenticate once with 'kagi login' (Keycloak Device Authorization Grant); scripts and agents act through that same logged-in session.",
+	Example: "  kagi login\n" +
+		"  kagi setup --path /village/kaizen --env prod\n" +
+		"  kagi secrets list\n" +
+		"  kagi secrets get DATABASE_URL",
+	// SilenceUsage stops Cobra from dumping the full usage/help text after every
+	// operational error (a failed API call is not a usage mistake). Usage is still
+	// shown for genuine argument/flag errors, which Cobra reports before RunE.
+	SilenceUsage: true,
 }
 
 func Execute() {
@@ -76,15 +84,25 @@ func initConfig() {
 		}
 	}
 
-	// If --dev not explicitly set, check stored credentials
-	if !cfgDevMode && storedCreds.DevMode {
-		cfgDevMode = true
-	}
-
-	// Resolve API URL: --dev flag → env var → config file → stored creds → production default
-	if cfgDevMode {
+	// Dev-mode precedence (fixes the sticky-dev bug):
+	//   explicit --dev → KAGI_API_URL/KAGI_KEYCLOAK_ISSUER → config file →
+	//   stored DevMode → stored URL → production default
+	//
+	// An EXPLICIT --dev (the flag was actually passed) is top priority: its dev
+	// URLs are assigned here, before the env/config checks, so nothing can
+	// override them. An explicit --dev=false is honored too — it does not force
+	// dev and, via the guard below, suppresses the stored-DevMode fallback.
+	devExplicit := rootCmd.PersistentFlags().Changed("dev")
+	if devExplicit && cfgDevMode {
 		cfgAPIURL = devAPIURL
 		cfgIssuer = devIssuer
+	}
+
+	// A stored DevMode from a prior `kagi login --dev` is only a low-priority
+	// fallback (below the env vars and config file). It applies solely when --dev
+	// was not passed explicitly, so an explicit --dev=false is never overridden.
+	if !devExplicit && storedCreds.DevMode {
+		cfgDevMode = true
 	}
 
 	if cfgAPIURL == "" {
@@ -92,6 +110,8 @@ func initConfig() {
 			cfgAPIURL = v
 		} else if cfg.APIURL != "" && !isStaleAPIURL(cfg.APIURL) {
 			cfgAPIURL = cfg.APIURL
+		} else if cfgDevMode {
+			cfgAPIURL = devAPIURL
 		} else if storedCreds.APIURL != "" && !isStaleAPIURL(storedCreds.APIURL) {
 			cfgAPIURL = storedCreds.APIURL
 		} else {
@@ -104,6 +124,8 @@ func initConfig() {
 			cfgIssuer = v
 		} else if cfg.Issuer != "" && !isStaleIssuer(cfg.Issuer) {
 			cfgIssuer = cfg.Issuer
+		} else if cfgDevMode {
+			cfgIssuer = devIssuer
 		} else if storedCreds.IssuerURL != "" && !isStaleIssuer(storedCreds.IssuerURL) {
 			cfgIssuer = storedCreds.IssuerURL
 		} else {

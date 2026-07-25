@@ -6,9 +6,9 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/senseylabs/kagi-cli/internal/client"
+	"github.com/senseylabs/kagi-cli/internal/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -38,30 +38,34 @@ var secretSetCmd = &cobra.Command{
 }
 
 var secretGetCmd = &cobra.Command{
-	Use:   "get <KEY>",
-	Short: "Get a single secret (decrypted)",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runSecretGet,
+	Use:               "get <KEY>",
+	Short:             "Get a single secret (decrypted)",
+	Args:              cobra.ExactArgs(1),
+	ValidArgsFunction: completeSecretKeys,
+	RunE:              runSecretGet,
 }
 
 var secretDeleteYes bool
 
 var secretDeleteCmd = &cobra.Command{
-	Use:   "delete <KEY>",
-	Short: "Delete a secret",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runSecretDelete,
+	Use:               "delete <KEY>",
+	Short:             "Delete a secret",
+	Args:              cobra.ExactArgs(1),
+	ValidArgsFunction: completeSecretKeys,
+	RunE:              runSecretDelete,
 }
 
 var secretListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all secrets (masked)",
+	Args:  cobra.NoArgs,
 	RunE:  runSecretList,
 }
 
 var secretEnvsCmd = &cobra.Command{
 	Use:   "envs",
 	Short: "List environments for an app",
+	Args:  cobra.NoArgs,
 	RunE:  runSecretEnvs,
 }
 
@@ -80,6 +84,36 @@ func init() {
 	rootCmd.AddCommand(secretsCmd)
 }
 
+// completeSecretKeys offers the secret KEYs of the resolved app/environment for
+// `secrets get <KEY>` / `secrets delete <KEY>` shell completion, reusing the
+// folder/app resolution and the ListSecrets call. Any failure (unauthenticated,
+// unresolvable app, network) yields no suggestions rather than an error.
+func completeSecretKeys(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) != 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	if err := requireAuth(); err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	vc, err := client.NewKagiClient(cfgAPIURL, cfgIssuer)
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	ctx, err := resolveAppEnv(cmd, vc)
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	secrets, err := vc.ListSecrets(ctx.AppID, ctx.EnvSlug)
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	keys := make([]string, 0, len(secrets))
+	for _, s := range secrets {
+		keys = append(keys, s.KeyName)
+	}
+	return keys, cobra.ShellCompDirectiveNoFileComp
+}
+
 // runSecretsBrowse handles bare `kagi secrets [path]` — it browses the SECRETS
 // folder tree at the given path (root when omitted), listing child folders and
 // the apps directly under it. Apps carry their stable ID, which is what setup
@@ -88,6 +122,12 @@ func runSecretsBrowse(cmd *cobra.Command, args []string) error {
 	if err := requireAuth(); err != nil {
 		return err
 	}
+
+	format, err := outputFormat()
+	if err != nil {
+		return err
+	}
+	u := newUI()
 
 	vc, err := client.NewKagiClient(cfgAPIURL, cfgIssuer)
 	if err != nil {
@@ -104,26 +144,35 @@ func runSecretsBrowse(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to browse %q: %w", path, err)
 	}
 
-	if len(children.Folders) == 0 && len(children.Apps) == 0 {
-		fmt.Printf("No folders or apps under %q.\n", path)
+	if len(children.Folders) == 0 && len(children.Apps) == 0 && format == ui.FormatTable {
+		u.Info("No folders or apps under %q.", path)
 		return nil
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "TYPE\tNAME\tSLUG\tAPP ID")
+	// APP ID is a UUID — the least human-meaningful column, so it yields width
+	// first while the name and slug stay readable.
+	table := ui.NewTable("TYPE", "NAME", "SLUG", "APP ID").
+		SetTruncatable(3, 0)
 	for _, f := range children.Folders {
-		fmt.Fprintf(w, "folder\t%s\t%s\t%s\n", f.Name, f.Slug, "")
+		table.AddRow("folder", f.Name, f.Slug, "")
 	}
 	for _, a := range children.Apps {
-		fmt.Fprintf(w, "app\t%s\t%s\t%s\n", a.Name, a.Slug, a.ID)
+		table.AddRow("app", a.Name, a.Slug, a.ID)
 	}
-	return w.Flush()
+
+	return u.Print(format, children, table)
 }
 
 func runSecretEnvs(cmd *cobra.Command, args []string) error {
 	if err := requireAuth(); err != nil {
 		return err
 	}
+
+	format, err := outputFormat()
+	if err != nil {
+		return err
+	}
+	u := newUI()
 
 	vc, err := client.NewKagiClient(cfgAPIURL, cfgIssuer)
 	if err != nil {
@@ -140,23 +189,26 @@ func runSecretEnvs(cmd *cobra.Command, args []string) error {
 		return classifyAppError(err, label)
 	}
 
-	if len(envs) == 0 {
-		fmt.Printf("No environments found for app %s.\n", label)
+	if len(envs) == 0 && format == ui.FormatTable {
+		u.Info("No environments found for app %s.", label)
 		return nil
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tNAME\tSLUG")
+	table := ui.NewTable("ID", "NAME", "SLUG").
+		SetTruncatable(0, 0)
 	for _, e := range envs {
-		fmt.Fprintf(w, "%s\t%s\t%s\n", e.ID, e.Name, e.Slug)
+		table.AddRow(e.ID, e.Name, e.Slug)
 	}
-	return w.Flush()
+
+	return u.Print(format, envs, table)
 }
 
 func runSecretSet(cmd *cobra.Command, args []string) error {
 	if err := requireAuth(); err != nil {
 		return err
 	}
+
+	u := newUI()
 
 	vc, err := client.NewKagiClient(cfgAPIURL, cfgIssuer)
 	if err != nil {
@@ -227,7 +279,7 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to set secrets: %w", err)
 	}
 
-	fmt.Printf("Set %d secret(s).\n", len(secrets))
+	u.Success("Set %d secret(s).", len(secrets))
 	return nil
 }
 
@@ -235,6 +287,12 @@ func runSecretGet(cmd *cobra.Command, args []string) error {
 	if err := requireAuth(); err != nil {
 		return err
 	}
+
+	format, err := outputFormat()
+	if err != nil {
+		return err
+	}
+	u := newUI()
 
 	vc, err := client.NewKagiClient(cfgAPIURL, cfgIssuer)
 	if err != nil {
@@ -270,14 +328,22 @@ func runSecretGet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get secret: %w", err)
 	}
 
-	fmt.Println(revealed.Value)
-	return nil
+	// The table view of a single secret is just its value — the payload a script
+	// consuming `kagi secrets get KEY` expects on stdout. JSON/YAML emit the full
+	// revealed record (id, keyName, value).
+	if format == ui.FormatTable {
+		u.Data(revealed.Value)
+		return nil
+	}
+	return u.Print(format, revealed, nil)
 }
 
 func runSecretDelete(cmd *cobra.Command, args []string) error {
 	if err := requireAuth(); err != nil {
 		return err
 	}
+
+	u := newUI()
 
 	vc, err := client.NewKagiClient(cfgAPIURL, cfgIssuer)
 	if err != nil {
@@ -310,15 +376,8 @@ func runSecretDelete(cmd *cobra.Command, args []string) error {
 
 	// Confirm deletion
 	if !secretDeleteYes {
-		fmt.Printf("Are you sure you want to delete secret %q? [y/N]: ", keyName)
-		reader := bufio.NewReader(os.Stdin)
-		input, err := reader.ReadString('\n')
-		if err != nil {
-			return fmt.Errorf("failed to read input: %w", err)
-		}
-		input = strings.TrimSpace(strings.ToLower(input))
-		if input != "y" && input != "yes" {
-			fmt.Println("Aborted.")
+		if !u.Confirm(fmt.Sprintf("Are you sure you want to delete secret %q?", keyName)) {
+			u.Info("Aborted.")
 			return nil
 		}
 	}
@@ -327,7 +386,7 @@ func runSecretDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to delete secret: %w", err)
 	}
 
-	fmt.Printf("Deleted secret %q.\n", keyName)
+	u.Success("Deleted secret %q.", keyName)
 	return nil
 }
 
@@ -335,6 +394,12 @@ func runSecretList(cmd *cobra.Command, args []string) error {
 	if err := requireAuth(); err != nil {
 		return err
 	}
+
+	format, err := outputFormat()
+	if err != nil {
+		return err
+	}
+	u := newUI()
 
 	vc, err := client.NewKagiClient(cfgAPIURL, cfgIssuer)
 	if err != nil {
@@ -351,17 +416,18 @@ func runSecretList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to list secrets: %w", err)
 	}
 
-	if len(secrets) == 0 {
-		fmt.Println("No secrets found.")
+	if len(secrets) == 0 && format == ui.FormatTable {
+		u.Info("No secrets found.")
 		return nil
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "KEY\tVALUE\tUPDATED")
+	table := ui.NewTable("KEY", "VALUE", "UPDATED").
+		SetTruncatable(1, 0)
 	for _, s := range secrets {
-		fmt.Fprintf(w, "%s\t%s\t%s\n", s.KeyName, s.MaskedValue, s.UpdatedAt)
+		table.AddRow(s.KeyName, s.MaskedValue, s.UpdatedAt)
 	}
-	return w.Flush()
+
+	return u.Print(format, secrets, table)
 }
 
 // parseKeyValue splits a string on the first '=' into key and value.
