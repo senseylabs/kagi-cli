@@ -8,9 +8,10 @@ import (
 
 	kagi "github.com/senseylabs/kagi-sdk"
 
+	"github.com/spf13/cobra"
+
 	"github.com/senseylabs/kagi-cli/internal/client"
 	"github.com/senseylabs/kagi-cli/internal/config"
-	"github.com/spf13/cobra"
 )
 
 // personalEnvSlug is the reserved environment slug for a user's personal
@@ -29,10 +30,10 @@ type resolvedContext struct {
 	FolderPath string
 }
 
-// upgradeErr is the actionable error shown when a config still uses the legacy
+// errUpgrade is the actionable error shown when a config still uses the legacy
 // project/app binding (no app ID). The CLI never silently falls back — the user
 // must re-run setup to capture the stable app ID under the folder model.
-var upgradeErr = errors.New(
+var errUpgrade = errors.New(
 	"this kagi.yaml uses the legacy project/app model, which is no longer supported.\n" +
 		"  Re-run 'kagi setup' to bind to a folder path + environment and capture the app ID,\n" +
 		"  or set the binding explicitly with --path <folder/app path> --env <env> (or --app-id <id> --env <env>)")
@@ -112,7 +113,7 @@ func resolveAppEnvWith(cmd *cobra.Command, vc *client.KagiClient, opts resolveOp
 		appID = cfg.AppID
 		folderPath = cfg.FolderPath
 	case cfg.IsLegacy():
-		return nil, upgradeErr
+		return nil, errUpgrade
 	default:
 		return nil, fmt.Errorf("app not specified. Use --path <folder/app path> or --app-id <id>, or run 'kagi setup' to create a kagi.yaml")
 	}
@@ -228,7 +229,7 @@ func resolveAppOnly(cmd *cobra.Command, vc *client.KagiClient) (string, string, 
 	case cfg.AppID != "":
 		return cfg.AppID, appLabel(cfg.FolderPath, cfg.AppID), nil
 	case cfg.IsLegacy():
-		return "", "", upgradeErr
+		return "", "", errUpgrade
 	default:
 		return "", "", fmt.Errorf("app not specified. Use --path <folder/app path> or --app-id <id>, or run 'kagi setup' to create a kagi.yaml")
 	}

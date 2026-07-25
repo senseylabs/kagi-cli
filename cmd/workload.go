@@ -5,9 +5,10 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/spf13/cobra"
+
 	"github.com/senseylabs/kagi-cli/internal/client"
 	"github.com/senseylabs/kagi-cli/internal/ui"
-	"github.com/spf13/cobra"
 )
 
 var workloadCmd = &cobra.Command{

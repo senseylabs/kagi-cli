@@ -25,7 +25,7 @@ const (
 var ErrNoCredentials = errors.New("no credentials found")
 
 // keyringProbeTimeout bounds the availability probe of the OS secret service.
-// go-keyring on Linux can block for seconds dialling a broken/absent D-Bus
+// go-keyring on Linux can block for seconds dialing a broken/absent D-Bus
 // Secret Service before erroring, which would stall every command on a headless
 // box; capping the probe keeps the fallback path fast rather than a hang.
 const keyringProbeTimeout = 3 * time.Second
@@ -88,7 +88,7 @@ func warnPlaintextFallback() {
 }
 
 func (k *keyringStore) Save(creds Credentials) error {
-	data, err := json.Marshal(creds)
+	data, err := json.Marshal(creds) //nolint:gosec // serializing credentials to store in the OS secret service is this store's purpose
 	if err != nil {
 		return fmt.Errorf("failed to serialize credentials: %w", err)
 	}

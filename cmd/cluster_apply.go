@@ -5,10 +5,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/senseylabs/kagi-cli/internal/client"
-	"github.com/senseylabs/kagi-cli/internal/ui"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
+
+	"github.com/senseylabs/kagi-cli/internal/client"
+	"github.com/senseylabs/kagi-cli/internal/ui"
 )
 
 // applySpec is the parsed shape of a `kagi cluster apply` file.

@@ -4,8 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/senseylabs/kagi-cli/internal/client"
 	"github.com/spf13/cobra"
+
+	"github.com/senseylabs/kagi-cli/internal/client"
 )
 
 // newSecretCmd builds a throwaway command carrying the shared secret flags,

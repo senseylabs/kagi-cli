@@ -7,9 +7,10 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/spf13/cobra"
+
 	"github.com/senseylabs/kagi-cli/internal/client"
 	"github.com/senseylabs/kagi-cli/internal/ui"
-	"github.com/spf13/cobra"
 )
 
 var keyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)

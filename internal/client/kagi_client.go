@@ -137,7 +137,7 @@ func NewKagiClient(baseURL, issuerURL string) (*KagiClient, error) {
 			}
 			deviceFlow := auth.NewDeviceFlow(refreshIssuer, "cli", auth.DefaultScope)
 			// Bound discovery on this routine refresh path to a single-shot-ish
-			// budget (matches the pre-change behaviour); the interactive `kagi
+			// budget (matches the pre-change behavior); the interactive `kagi
 			// login` path is where the longer cold-start retry budget applies.
 			discoverCtx, discoverCancel := context.WithTimeout(context.Background(), 15*time.Second)
 			endpoints, err := deviceFlow.DiscoverEndpoints(discoverCtx)

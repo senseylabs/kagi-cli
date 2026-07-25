@@ -7,8 +7,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/senseylabs/kagi-cli/internal/client"
 	"github.com/spf13/cobra"
+
+	"github.com/senseylabs/kagi-cli/internal/client"
 )
 
 var runCmd = &cobra.Command{
@@ -69,7 +70,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	u.Status("Running %s with %d secret(s) injected.", cmdArgs[0], len(secrets))
 
 	// Execute the command
-	childCmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
+	childCmd := exec.Command(cmdArgs[0], cmdArgs[1:]...) //nolint:gosec // running a user-supplied command with injected secrets is the entire purpose of `kagi run`
 	childCmd.Env = env
 	childCmd.Stdin = os.Stdin
 	childCmd.Stdout = os.Stdout

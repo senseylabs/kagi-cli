@@ -29,7 +29,7 @@ func (f *fileStore) Save(creds Credentials) error {
 		return fmt.Errorf("failed to create credentials directory: %w", err)
 	}
 
-	data, err := json.MarshalIndent(creds, "", "  ")
+	data, err := json.MarshalIndent(creds, "", "  ") //nolint:gosec // serializing credentials for the local token store is this store's purpose; the file is written 0600
 	if err != nil {
 		return fmt.Errorf("failed to serialize credentials: %w", err)
 	}

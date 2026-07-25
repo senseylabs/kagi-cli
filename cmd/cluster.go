@@ -8,11 +8,12 @@ import (
 	"strings"
 
 	"github.com/AlecAivazis/survey/v2"
+	"github.com/spf13/cobra"
+	"golang.org/x/term"
+
 	"github.com/senseylabs/kagi-cli/internal/client"
 	"github.com/senseylabs/kagi-cli/internal/kube"
 	"github.com/senseylabs/kagi-cli/internal/ui"
-	"github.com/spf13/cobra"
-	"golang.org/x/term"
 )
 
 var clusterCmd = &cobra.Command{

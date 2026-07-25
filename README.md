@@ -1,6 +1,12 @@
 # Kagi CLI
 
-A CLI tool for managing secrets in Kagi. Supports Keycloak Device Authorization Grant for interactive login and Personal Access Tokens (PAT) for CI/CD pipelines.
+A CLI for managing secrets and certificates in Kagi. You authenticate **once**
+with `kagi login` (Keycloak Device Authorization Grant); scripts and AI agents
+then act through that same logged-in session — no token to pass around.
+
+Secrets and certificates live in an organization-scoped **folder tree**. Apps
+are addressed by a stable **app ID**, which you resolve once from a folder path
+(`kagi setup`) and pin in a per-directory `kagi.yaml`.
 
 ## Installation
 
@@ -8,9 +14,7 @@ A CLI tool for managing secrets in Kagi. Supports Keycloak Device Authorization 
 |---|---|---|
 | Homebrew | macOS, Linux | `brew install senseylabs/tap/kagi-cli` |
 | curl (install script) | macOS, Linux | `curl -sSf https://get.kagi.pw \| sh` |
-| Scoop | Windows | coming soon |
-| winget | Windows | coming soon |
-| Chocolatey | Windows | coming soon |
+| PowerShell | Windows | `iwr https://get.kagi.pw/install.ps1 -useb \| iex` |
 | Direct download | macOS, Linux, Windows | [GitHub Releases](https://github.com/senseylabs/kagi-cli/releases) |
 
 ### Homebrew
@@ -26,215 +30,417 @@ brew install kagi-cli
 curl -sSf https://get.kagi.pw | sh
 ```
 
-This downloads the latest release for your OS/architecture, verifies its
-checksum, and installs `kagi` to `/usr/local/bin` (falling back to
-`~/.local/bin` if that isn't writable). See `install.sh` in this repo.
+Downloads the latest release for your OS/architecture, verifies its checksum,
+and installs `kagi` to `/usr/local/bin` (falling back to `~/.local/bin` if that
+isn't writable). See `install.sh` in this repo.
 
-### Windows
-
-Scoop, winget, and Chocolatey packages are not published yet (coming soon).
-Until then, install with PowerShell:
+### Windows (PowerShell)
 
 ```powershell
 iwr https://get.kagi.pw/install.ps1 -useb | iex
 ```
 
-or download the `windows_amd64`/`windows_arm64` `.zip` directly from the
-[releases page](https://github.com/senseylabs/kagi-cli/releases) and put
-`kagi.exe` on your `PATH`.
+Installs `kagi.exe` into `%LOCALAPPDATA%\Kagi\bin` and adds it to your user
+`PATH`. See `install.ps1`. Scoop / winget / Chocolatey packages are not
+published yet. You can also download the `windows_amd64` / `windows_arm64`
+`.zip` directly from the [releases page](https://github.com/senseylabs/kagi-cli/releases)
+and put `kagi.exe` on your `PATH`.
 
 ### Direct download
 
 Prebuilt binaries for macOS, Linux, and Windows (amd64 + arm64), plus
-`.deb`/`.rpm`/`.apk` packages for Linux, are attached to every
+`.deb` / `.rpm` / `.apk` packages for Linux, are attached to every
 [GitHub release](https://github.com/senseylabs/kagi-cli/releases).
 
-## Usage
+## Authentication model
 
-### Login
+Kagi has one interactive credential and no CLI-minted tokens.
+
+- **Humans** run `kagi login` once. This starts a Keycloak Device Authorization
+  Grant, opens your browser, and stores the resulting credentials in your OS
+  secret service (macOS Keychain, Linux Secret Service / D-Bus, Windows
+  Credential Manager), falling back to a file under `~/.kagi` where no secret
+  service is available.
+
+- **Scripts and AI agents** invoke `kagi` on a machine where a human has already
+  logged in. They inherit that session — there is nothing to export, no token to
+  manage.
+
+- **`KAGI_TOKEN` is gone.** The CLI no longer authenticates with Personal Access
+  Tokens. If `KAGI_TOKEN` is set it exits with an error asking you to run
+  `kagi login` and unset it.
+
+- **The CLI can never create tokens.** There is deliberately no `token create`
+  command. `kagi token list` / `kagi token revoke` are management-only.
+
+- **Truly headless machines** (CI runners, Kubernetes workloads) don't log in at
+  all. They authenticate with **workload identity** — a Kubernetes service
+  account's projected token, exchanged for Kagi access via the operator. You
+  register the cluster and bind the service account with `kagi cluster` and
+  `kagi workload` (below); the workload itself never runs `kagi login`.
 
 ```bash
-kagi login
+kagi login    # once, interactively
+kagi logout   # clear stored credentials
 ```
 
-Opens your browser for Keycloak authentication. Stores credentials in the macOS Keychain (or `~/.kagi/credentials` on Linux).
+After login the CLI resolves your organization membership (see below).
 
-After login, the CLI resolves your organization membership:
+## Organizations
 
-- **One organization** — it is auto-selected and you are told which.
-- **Multiple organizations** — they are listed; pick one with `kagi org use <slug>`.
-- **None** — you are prompted to join/create an organization first.
-
-### Organizations
-
-Kagi is multi-organization. Human (JWT) commands act within a single **active
-organization**, sent to the API as the `X-Organization-ID` header (the org UUID).
+Kagi is multi-organization. Human commands act within a single **active
+organization**, sent to the API as the `X-Organization-ID` header.
 
 ```bash
-# List the organizations you belong to (the active one is marked with *)
-kagi org list
-
-# Set the active organization by slug
-kagi org use sensey
-
-# Show the active organization
-kagi org current
+kagi org list       # organizations you belong to (active one marked with *)
+kagi org use sensey # set the active organization by slug
+kagi org current    # show the active organization
 ```
 
-The active organization (slug + UUID) is persisted to `~/.kagi/config.yaml`.
-If no organization is selected, org-scoped commands fail with a clear message
-asking you to run `kagi org use <slug>`.
+On login: a single membership is auto-selected; multiple memberships are listed
+for you to pick with `kagi org use <slug>`; none prompts you to join or create an
+org first. The selection (slug + UUID) is persisted to `~/.kagi/config.yaml`.
+Org-scoped commands fail with a clear message if no organization is selected.
 
-> **CI / `KAGI_TOKEN` (PAT):** a Personal Access Token is bound to one
-> organization server-side. PAT requests therefore send **no** org header and
-> need **no** `kagi org use` step — `KAGI_TOKEN=vv_... kagi pull ...` keeps
-> working with zero extra flags. Sending a mismatched `X-Organization-ID` with a
-> PAT is rejected by the backend (403), so the CLI never sends one. The
-> `kagi org` commands are JWT-only and refuse to run when `KAGI_TOKEN` is set.
+## Binding a directory: `setup` + `kagi.yaml`
 
-### Setup
-
-Interactive setup wizard to configure your project and environment:
+Instead of passing an app on every command, bind the current directory once:
 
 ```bash
+# Interactive: browse for the app and environment
 kagi setup
+
+# Non-interactive
+kagi setup --path /village/kaizen --env prod
 ```
 
-### Personal environments (`--personal`)
+`setup` resolves the folder/app **path** to the app's stable **app ID** and
+writes a `kagi.yaml` in the current directory:
 
-`--personal` targets your own personal environment for an app — sugar for
-`--env personal`. It is available on `run`, `pull`, and the `secrets`
-subcommands:
+```yaml
+# Kagi binding for this directory. Secrets are addressed by the stable
+# app-id; folder-path is a human reference only and is not used for addressing.
+folder-path: /village/kaizen
+app-id: 7a3c...            # stable — survives app renames and folder moves
+environment: prod
+organization: sensey                                    # active org slug (display)
+organization-id: 00000000-0000-0000-0000-000000000000   # active org UUID (header)
+```
+
+Addressing uses `app-id`; `folder-path` is documentation only. Use `-y` to
+overwrite an existing `kagi.yaml` without prompting.
+
+> The legacy pre-folder-model `project:` / `app:` keys are no longer used for
+> addressing. A `kagi.yaml` that still has them and lacks `app-id` is detected as
+> stale and you'll be asked to re-run `kagi setup`. **Do not** add a `project:`
+> key by hand — it trips the legacy detector.
+
+### Overriding the binding
+
+Every secrets/pull/run command accepts, in precedence order:
+
+- `--app-id <id>` — the stable machine binding, highest precedence
+- `--path/-p <path>` — a folder/app path (e.g. `/village/kaizen`), resolved to an
+  app ID
+- `--env/-e <slug>` — the environment slug
+
+Any of these override the `kagi.yaml` values for that one invocation.
+
+## Working with secrets
+
+`kagi secrets` browses the folder tree and manages secrets for an app's
+environment.
 
 ```bash
-kagi run --personal -- npm run dev
-kagi pull --personal --output .env
-kagi secrets list --personal
+# Browse the secrets root (folders + apps)
+kagi secrets
+
+# Browse a folder
+kagi secrets /village
+
+# List an app's environments
+kagi secrets envs -p /village/kaizen
+
+# List masked secrets for an (app, env)
+kagi secrets list -p /village/kaizen -e prod
+
+# Get one secret, decrypted
+kagi secrets get DATABASE_URL -p /village/kaizen -e prod
+
+# Set one or more KEY=VALUE pairs
+kagi secrets set DATABASE_URL=postgres://... API_KEY=... -p /village/kaizen -e prod
+
+# Import from an .env file
+kagi secrets set --from-file .env -p /village/kaizen -e prod
+
+# Delete a secret (-y to skip confirmation)
+kagi secrets delete DATABASE_URL -p /village/kaizen -e prod
 ```
 
-Personal environments are **user-scoped**: they require an interactive
-`kagi login` (JWT). A Personal Access Token (`KAGI_TOKEN`, used in CI) is
-rejected with a clear error and never falls back to a shared environment.
+With a `kagi.yaml` in place you can drop the `-p`/`-e` flags:
 
-**Fallback (run/pull only).** Not every app has a personal environment. When
-you pass `--personal` to `run` or `pull` and the app has none, the CLI falls
-back to the environment in your `kagi.yaml` and prints a warning to **stderr**
-(stdout stays a clean `KEY=VALUE` stream for `pull`):
-
+```bash
+kagi secrets list
+kagi secrets get DATABASE_URL
 ```
-warning: app "/clients/fepatex/api" (…) has no "personal" environment; falling back to "local" from kagi.yaml
-```
-
-The `secrets` subcommands (`set`, `get`, `delete`, `list`, `envs`) are
-**strict**: `--personal` against an app with no personal environment is a hard
-error, never a silent redirect — writing to a shared environment by accident
-would affect every developer who pulls it. Naming the environment explicitly
-with `--env personal` is likewise always strict, even on `run`/`pull`.
 
 ### Pull secrets
 
 ```bash
-# To stdout
-kagi pull --project my-app --env production
+# KEY=VALUE to stdout
+kagi pull
 
-# To a file
-kagi pull --project my-app --env development --output .env
+# to a file (written 0600)
+kagi pull --out-file .env
 
-# As JSON
-kagi pull --project my-app --env staging --format json
+# as JSON or YAML
+kagi pull -o json
+kagi pull -o yaml
+
+# override the binding
+kagi pull -p /village/kaizen -e prod
 ```
 
 ### Run a command with secrets injected
 
 ```bash
 kagi run -- npm start
+kagi run -p /village/kaizen -e prod -- ./deploy.sh
 ```
 
-### Manage secrets
+Secrets are injected as environment variables into the child process only.
+
+### Personal environments (`--personal`)
+
+`--personal` targets your own personal environment for an app — sugar for
+`--env personal`. Available on `run`, `pull`, and the `secrets` subcommands:
 
 ```bash
-# Set one or more secrets (KEY=VALUE pairs)
-kagi secrets set DATABASE_URL=postgres://... --project my-project --app my-app --env production
-
-# Import secrets from an .env file
-kagi secrets set --from-file=.env --project my-project --app my-app --env production
-
-# Get a single secret (decrypted)
-kagi secrets get DATABASE_URL --project my-project --app my-app --env production
-
-# List all secrets (masked)
-kagi secrets list --project my-project --app my-app --env production
-
-# Delete a secret
-kagi secrets delete DATABASE_URL --project my-project --app my-app --env production
+kagi run --personal -- npm run dev
+kagi pull --personal --out-file .env
+kagi secrets list --personal
 ```
 
-### Browse the hierarchy
+Personal environments are user-scoped and require an interactive login.
+`run`/`pull` fall back to the `kagi.yaml` environment (with a warning on
+**stderr**, keeping stdout a clean stream) when an app has no personal
+environment; the `secrets` subcommands are **strict** and error instead of
+silently redirecting to a shared environment.
 
-`kagi secrets` is flag-driven:
+## Certificates
+
+`kagi cert` browses a certificate folder tree and manages certificates. A
+leading-slash argument is a node path (folder segments then the certificate
+slug); anything else matches by name, slug, or id.
 
 ```bash
-# List all projects
-kagi secrets
+# Browse the certificates root / a folder
+kagi cert
+kagi cert /sensey
 
-# List apps in a project
-kagi secrets -p my-project
+# List every certificate (flat) with its folder path
+kagi cert list
 
-# List masked secrets for an (app, env) pair
-kagi secrets -p my-project -a my-app -e production
+# Show a certificate by node path, or by name/slug/id
+kagi cert get /sensey/sensey-io-cloudflare-cert
+kagi cert get sensey-io-cloudflare-cert
+
+# Reveal the certificate + private key PEM content
+kagi cert reveal sensey-io-cloudflare-cert
+
+# Create a certificate in a folder
+kagi cert create --name sensey-io --cert-file cert.pem --key-file key.pem --path /sensey
+
+# Update (replace the PEM material)
+kagi cert update sensey-io --cert-file new-cert.pem --key-file new-key.pem
+
+# Audit history / delete
+kagi cert history sensey-io
+kagi cert delete sensey-io
 ```
 
-Use `kagi secrets env list -p my-project` to list environments; bare `kagi secrets -p my-project` lists apps.
+`create` requires `--name` and `--cert-file`; `--key-file` is optional and
+`--path/-p` defaults to the root (`/`).
 
-### Manage projects, apps, environments
+## Cluster issuers (workload identity)
+
+Register a Kubernetes cluster's OIDC issuer so its workloads can authenticate to
+Kagi with projected service-account tokens. These writes require an active org
+and an **ADMIN/OWNER** role — log in and run `kagi org use <slug>` first.
 
 ```bash
-# Projects
-kagi secrets project create --name my-project --description "..."
-kagi secrets project delete --name my-project
+# Register the current/selected cluster (auto-detects issuer URL + type)
+kagi cluster create --context prod          # alias: kagi cluster register
 
-# Apps (scoped to a project)
-kagi secrets app create -p my-project --name my-app --description "..."
-kagi secrets app delete -p my-project --name my-app
+# Interactive: pick a kubeconfig context; issuer URL and type auto-detected
+kagi cluster create
 
-# Environments (scoped to a project)
-kagi secrets env list   -p my-project
-kagi secrets env create -p my-project --name Production --slug production
-kagi secrets env delete -p my-project --slug production
+# List registered issuers
+kagi cluster list
+
+# Update a display name / JWKS / enabled flag (issuer URL is immutable)
+kagi cluster update <id|url> --name prod-cluster
+kagi cluster update <id|url> --disable
+kagi cluster update <id|url> --detect-jwks        # pin JWKS via kubectl
+kagi cluster update <id|url> --clear-jwks         # revert to OIDC discovery
+
+# Remove an issuer
+kagi cluster delete <id|url>                # alias: kagi cluster rm
 ```
+
+For a **private** cluster whose JWKS Kagi can't fetch, pass `--detect-jwks`
+(read it via kubectl) or `--static-jwks-file <path>` on create. Cluster
+`--type` is one of `AKS`, `EKS`, `GKE`, `OPENSHIFT`, `K3S`, `GENERIC`
+(auto-detected from the issuer URL when omitted).
+
+### Declarative apply
+
+`kagi cluster apply` reconciles an issuer and its workload bindings from a YAML
+file. It's idempotent: matching resources are updated in place, missing ones
+created, unchanged ones left alone. `--prune` deletes this issuer's bindings that
+are absent from the file (logged; `-y` skips the confirmation).
+
+```bash
+kagi cluster apply -f trust.yaml
+kagi cluster apply -f trust.yaml --prune -y
+```
+
+```yaml
+# trust.yaml
+issuer:
+  url: https://oidc.example/cluster   # optional — auto-detected via kubectl if omitted
+  name: prod-cluster                  # display name; defaults to the issuer URL
+  staticJwks: auto                    # auto (detect via kubectl) | <path to JWKS file> | omitted (public cluster)
+  type: EKS                           # optional; inherits/creates as GENERIC when omitted
+bindings:
+  - namespace: app
+    serviceAccount: api
+    scopes:
+      - app: /village/kaizen
+        env: prod
+```
+
+## Workload bindings
+
+Bind a `(namespace, service account)` on a registered cluster to a set of app
+environments, so that workload's projected tokens can read those secrets. A
+binding is keyed by `(issuer, namespace, service account)`; binding the same
+triple again replaces its scopes.
+
+```bash
+# Bind a service account to one or more app environments
+kagi workload create \
+  --issuer <id|url> \
+  --namespace app \
+  --service-account api \
+  --scope /village/kaizen:prod \
+  --scope /village/other:staging     # alias: kagi workload bind
+
+# Single scope via --path/--env instead of --scope
+kagi workload create --issuer <id|url> --namespace app --service-account api \
+  --path /village/kaizen --env prod
+
+# List / remove bindings
+kagi workload list
+kagi workload delete <id>            # alias: kagi workload unbind
+```
+
+Scopes are `<app-path>:<env>`; each scope's app must belong to the active
+organization.
+
+## Tokens
+
+Inspect and revoke Kagi access tokens. There is **no** `token create` — the CLI
+never mints tokens.
+
+```bash
+kagi token list
+kagi token revoke <id>       # -y to skip confirmation
+```
+
+## Scripting
+
+Every command that prints a payload honors the global `--output/-o` flag with
+`table` (default), `json`, or `yaml`:
+
+```bash
+kagi secrets list -o json
+kagi cert list -o yaml
+kagi org list -o json
+```
+
+`kagi pull` additionally writes to a file with `--out-file` (mode 0600), and
+`kagi run` injects secrets directly into a child process — no intermediate file.
+
+## Shell completion
+
+```bash
+kagi completion bash       > /etc/bash_completion.d/kagi
+kagi completion zsh        > "${fpath[1]}/_kagi"
+kagi completion fish       > ~/.config/fish/completions/kagi.fish
+kagi completion powershell | Out-String | Invoke-Expression
+```
+
+Run `kagi completion <shell> --help` for the exact install steps per shell.
 
 ## Configuration
 
 ### Global flags
 
-| Flag | Env var | Default |
+| Flag | Meaning | Default |
 |------|---------|---------|
-| `--api-url` | `KAGI_API_URL` | `https://api.kagi.pw` |
-| `--issuer` | `KAGI_KEYCLOAK_ISSUER` | `https://auth.kagi.pw/realms/kagi` |
+| `--dev` | Use local development URLs (localhost) | off |
+| `-o, --output` | Output format: `table`, `json`, `yaml` | `table` |
+| `--no-color` | Disable colored output | off |
 
-### Config file (`.kagi.yaml`)
+### Environment variables
 
-Place in the current directory or `~/.kagi/config.yaml`:
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `KAGI_API_URL` | Override the API base URL | `https://api.kagi.pw` |
+| `KAGI_KEYCLOAK_ISSUER` | Override the Keycloak issuer | `https://auth.kagi.pw/realms/kagi` |
+| `KAGI_DISCOVERY_TIMEOUT` | OIDC discovery retry budget (Go duration, e.g. `10s`) | built-in default |
+
+`KAGI_API_URL` / `KAGI_KEYCLOAK_ISSUER` take precedence over config-file values.
+`KAGI_TOKEN` is **not** an authentication knob — the CLI errors if it is set.
+
+### Config files
+
+The CLI reads `kagi.yaml` from the current directory, falling back to
+`~/.kagi/config.yaml`. CWD values win. Note the filename is **`kagi.yaml`** (no
+leading dot).
+
+Recognized keys (folder model):
 
 ```yaml
 api-url: https://api.kagi.pw
-project: my-project
-environment: development
+issuer: https://auth.kagi.pw/realms/kagi
+folder-path: /village/kaizen                            # human reference only
+app-id: 7a3c...                                         # stable addressing key
+environment: prod
 organization: sensey                                    # active org slug (display)
 organization-id: 00000000-0000-0000-0000-000000000000   # active org UUID (header)
 ```
 
-The `organization` / `organization-id` keys are managed by `kagi org use` and
-`kagi login`; you normally don't edit them by hand.
+`organization` / `organization-id` are managed by `kagi org use` and
+`kagi login`; you normally don't edit them by hand. The directory binding
+(`app-id`, `folder-path`, `environment`) is written by `kagi setup`.
 
-### CI/CD
+## Go SDK
 
-Set `KAGI_TOKEN` environment variable to a Personal Access Token for non-interactive use:
+The Go SDK lives **in this repo** at [`./sdk`](./sdk) as a separate module,
+`github.com/senseylabs/kagi-sdk`. The CLI consumes it locally via a `replace`
+directive in `go.mod`:
 
-```bash
-export KAGI_TOKEN=vv_your_token_here
-kagi pull --project my-app --env production
 ```
+require github.com/senseylabs/kagi-sdk v0.0.0
+replace github.com/senseylabs/kagi-sdk => ./sdk
+```
+
+It is **not** currently `go get`-able as a standalone module — the tagged
+`v0.0.0` is a placeholder resolved through the replace directive. To use it
+today, vendor the `./sdk` directory or add your own `replace` pointing at a local
+checkout.
 
 ## License
 

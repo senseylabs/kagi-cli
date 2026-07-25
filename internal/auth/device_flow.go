@@ -135,7 +135,7 @@ type DeviceFlow struct {
 // The http.Client carries no Timeout: discovery's per-attempt timeout is owned
 // by the context inside httpx.GetWithRetry, and the single-shot POSTs bound
 // themselves via deviceRequestTimeout. Transport is left nil on purpose so
-// http.DefaultTransport keeps honouring ProxyFromEnvironment and HTTP/2 — both
+// http.DefaultTransport keeps honoring ProxyFromEnvironment and HTTP/2 — both
 // were verified innocent while diagnosing the cold-start failure.
 func NewDeviceFlow(issuerURL, clientID, scope string) *DeviceFlow {
 	return &DeviceFlow{
@@ -234,7 +234,7 @@ func (d *DeviceFlow) PollForToken(tokenEndpoint, deviceCode string, interval tim
 }
 
 // PollForTokenContext polls the token endpoint until the user completes
-// authentication, the device code expires, or ctx is cancelled.
+// authentication, the device code expires, or ctx is canceled.
 //
 // Transient network failures (a request that never got a response, or a body
 // that could not be read) do not abort the flow: they are tolerated up to
@@ -276,7 +276,7 @@ func (d *DeviceFlow) PollForTokenContext(ctx context.Context, tokenEndpoint, dev
 		resp, err := d.client.Do(req)
 		if err != nil {
 			cancel()
-			// Honour caller cancellation immediately; only tolerate genuine
+			// Honor caller cancellation immediately; only tolerate genuine
 			// transient failures.
 			if ctx.Err() != nil {
 				return nil, ctx.Err()

@@ -488,6 +488,6 @@ func TestErrorHandling_CancelledContext(t *testing.T) {
 	client := NewClient(ts.URL, "test-token")
 	_, err := client.ListEnvironments(ctx, "app-1")
 	if err == nil {
-		t.Fatal("expected error for cancelled context, got nil")
+		t.Fatal("expected error for canceled context, got nil")
 	}
 }

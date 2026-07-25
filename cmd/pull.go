@@ -7,9 +7,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/senseylabs/kagi-cli/internal/client"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
+
+	"github.com/senseylabs/kagi-cli/internal/client"
 )
 
 var pullOutFile string
@@ -92,7 +93,7 @@ func runPull(cmd *cobra.Command, args []string) error {
 		sort.Strings(keys)
 		var sb strings.Builder
 		for _, k := range keys {
-			sb.WriteString(fmt.Sprintf("%s=\"%s\"\n", k, escapeEnvValue(secrets[k])))
+			fmt.Fprintf(&sb, "%s=\"%s\"\n", k, escapeEnvValue(secrets[k]))
 		}
 		output = sb.String()
 	}

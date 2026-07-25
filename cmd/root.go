@@ -7,9 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/senseylabs/kagi-cli/internal/auth"
 	"github.com/senseylabs/kagi-cli/internal/config"
-	"github.com/spf13/cobra"
 )
 
 const (

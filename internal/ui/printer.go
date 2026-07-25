@@ -107,7 +107,9 @@ func (u *UI) Print(format Format, data any, table *Table) error {
 		if err != nil {
 			return Wrapf(err, "encode yaml")
 		}
-		u.out.Write(b)
+		if _, err := u.out.Write(b); err != nil {
+			return Wrapf(err, "write yaml output")
+		}
 		return nil
 	case FormatTable, "":
 		return u.Render(table)

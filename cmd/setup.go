@@ -8,10 +8,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/spf13/cobra"
+
 	"github.com/senseylabs/kagi-cli/internal/client"
 	"github.com/senseylabs/kagi-cli/internal/config"
 	"github.com/senseylabs/kagi-cli/internal/ui"
-	"github.com/spf13/cobra"
 )
 
 var (
@@ -255,17 +256,17 @@ func writeSetupConfig(folderPath, appID, envSlug string) error {
 	var sb strings.Builder
 	sb.WriteString("# Kagi binding for this directory. Secrets are addressed by the stable\n")
 	sb.WriteString("# app-id; folder-path is a human reference only and is not used for addressing.\n")
-	sb.WriteString(fmt.Sprintf("folder-path: %s\n", folderPath))
-	sb.WriteString(fmt.Sprintf("app-id: %s\n", appID))
-	sb.WriteString(fmt.Sprintf("environment: %s\n", envSlug))
+	fmt.Fprintf(&sb, "folder-path: %s\n", folderPath)
+	fmt.Fprintf(&sb, "app-id: %s\n", appID)
+	fmt.Fprintf(&sb, "environment: %s\n", envSlug)
 	if cfg.Organization != "" {
-		sb.WriteString(fmt.Sprintf("organization: %s\n", cfg.Organization))
+		fmt.Fprintf(&sb, "organization: %s\n", cfg.Organization)
 	}
 	if cfg.OrganizationID != "" {
-		sb.WriteString(fmt.Sprintf("organization-id: %s\n", cfg.OrganizationID))
+		fmt.Fprintf(&sb, "organization-id: %s\n", cfg.OrganizationID)
 	}
 
-	if err := os.WriteFile("kagi.yaml", []byte(sb.String()), 0644); err != nil {
+	if err := os.WriteFile("kagi.yaml", []byte(sb.String()), 0644); err != nil { //nolint:gosec // kagi.yaml is a non-secret, per-project binding (folder path, app ID, org) meant to be committed and shared; 0644 is intentional
 		return fmt.Errorf("failed to write kagi.yaml: %w", err)
 	}
 	return nil

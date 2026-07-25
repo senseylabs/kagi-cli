@@ -37,7 +37,7 @@ const (
 	// always the context deadline the caller supplies.
 	DefaultOverallBudget = 90 * time.Second
 	// maxRetryAfter caps how long a server-supplied Retry-After header is honored.
-	// A larger (or malicious) value is ignored in favour of the computed backoff
+	// A larger (or malicious) value is ignored in favor of the computed backoff
 	// so a single response can't park the whole budget on one sleep.
 	maxRetryAfter = 2 * time.Minute
 )
@@ -85,7 +85,7 @@ func DefaultOptions() Options {
 
 // defaultJitterSource is the production jitter source, backed by the standard
 // library's concurrency-safe global rand. It returns a value in [0,1).
-func defaultJitterSource() float64 { return rand.Float64() }
+func defaultJitterSource() float64 { return rand.Float64() } //nolint:gosec // backoff jitter is not security-sensitive; a cryptographic RNG is unnecessary
 
 // GetWithRetry issues GET requests against url, retrying transient failures
 // until it gets a definitive response or the caller's context deadline (the
@@ -190,7 +190,7 @@ func IsRetryable(err error) bool {
 	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) {
 		return true
 	}
-	// net.Error timeouts that os.IsTimeout may not recognise (e.g. dial timeout).
+	// net.Error timeouts that os.IsTimeout may not recognize (e.g. dial timeout).
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return true
@@ -271,7 +271,7 @@ func drainAndClose(body io.ReadCloser) {
 }
 
 // sleepWithContext sleeps for d or returns early with ctx.Err() if the context
-// is done first (budget exhausted or caller cancelled).
+// is done first (budget exhausted or caller canceled).
 func sleepWithContext(ctx context.Context, d time.Duration) error {
 	timer := time.NewTimer(d)
 	defer timer.Stop()

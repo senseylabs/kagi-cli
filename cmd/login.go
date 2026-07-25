@@ -10,12 +10,13 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/senseylabs/kagi-cli/internal/auth"
 	"github.com/senseylabs/kagi-cli/internal/client"
 	"github.com/senseylabs/kagi-cli/internal/config"
 	"github.com/senseylabs/kagi-cli/internal/httpx"
 	"github.com/senseylabs/kagi-cli/internal/ui"
-	"github.com/spf13/cobra"
 )
 
 var loginCmd = &cobra.Command{

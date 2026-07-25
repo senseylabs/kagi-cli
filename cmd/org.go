@@ -5,10 +5,11 @@ import (
 
 	kagi "github.com/senseylabs/kagi-sdk"
 
+	"github.com/spf13/cobra"
+
 	"github.com/senseylabs/kagi-cli/internal/client"
 	"github.com/senseylabs/kagi-cli/internal/config"
 	"github.com/senseylabs/kagi-cli/internal/ui"
-	"github.com/spf13/cobra"
 )
 
 var orgCmd = &cobra.Command{

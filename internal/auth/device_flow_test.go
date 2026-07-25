@@ -110,7 +110,7 @@ func TestPollForTokenPendingThenSuccess(t *testing.T) {
 	}
 }
 
-// A cancelled context must stop polling promptly with the context error.
+// A canceled context must stop polling promptly with the context error.
 func TestPollForTokenContextCancellation(t *testing.T) {
 	rt := &fakeRoundTripper{
 		fn: func(call int, req *http.Request) (*http.Response, error) {
@@ -120,7 +120,7 @@ func TestPollForTokenContextCancellation(t *testing.T) {
 	df := newFakeDeviceFlow(rt)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // already cancelled before the first sleep completes
+	cancel() // already canceled before the first sleep completes
 
 	_, err := df.PollForTokenContext(ctx, "https://issuer.example/token", "devcode",
 		time.Second, time.Now().Add(time.Hour))

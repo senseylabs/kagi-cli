@@ -166,7 +166,7 @@ func TestGetWithRetry_RetryAfterHonoured(t *testing.T) {
 	}
 	// The gap must reflect the honored 1s header, not the 10-20ms backoff.
 	if gap < 900*time.Millisecond {
-		t.Fatalf("Retry-After not honoured: second attempt fired after %s, want ~1s", gap)
+		t.Fatalf("Retry-After not honored: second attempt fired after %s, want ~1s", gap)
 	}
 }
 
@@ -271,7 +271,7 @@ func TestGetWithRetry_JitterSourceInjected(t *testing.T) {
 	}
 }
 
-// TestGetWithRetry_CallerCancellation proves a caller-cancelled context is
+// TestGetWithRetry_CallerCancellation proves a caller-canceled context is
 // reported as context.Canceled — distinct from ErrRetryBudgetExhausted — so a
 // deliberate Ctrl-C is not misreported as an unreachable auth service.
 func TestGetWithRetry_CallerCancellation(t *testing.T) {
@@ -388,7 +388,7 @@ func TestGetWithRetry_BudgetOverrideHonoured(t *testing.T) {
 		t.Fatalf("gave up before the budget: %s < %s", elapsed, shortBudget)
 	}
 	if elapsed > shortBudget+500*time.Millisecond {
-		t.Fatalf("short budget not honoured: %s (budget %s)", elapsed, shortBudget)
+		t.Fatalf("short budget not honored: %s (budget %s)", elapsed, shortBudget)
 	}
 }
 
