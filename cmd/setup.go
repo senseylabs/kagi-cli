@@ -251,7 +251,12 @@ func joinFolderPath(base, slug string) string {
 // (slug + UUID) is pinned when known so the binding is reproducible across
 // sessions and directories.
 func writeSetupConfig(folderPath, appID, envSlug string) error {
-	cfg := config.Load()
+	// Pin the organization from the account-level (home) selection, NOT the merged
+	// config. config.Load() folds in the cwd kagi.yaml we are about to overwrite,
+	// so a stale org pinned there would be re-pinned here — and under strict
+	// tenancy that stale org 403s every subsequent setup step with no way to clear
+	// it. HomeOrganization() reflects the true active selection instead.
+	orgSlug, orgID := config.HomeOrganization()
 
 	var sb strings.Builder
 	sb.WriteString("# Kagi binding for this directory. Secrets are addressed by the stable\n")
@@ -259,11 +264,11 @@ func writeSetupConfig(folderPath, appID, envSlug string) error {
 	fmt.Fprintf(&sb, "folder-path: %s\n", folderPath)
 	fmt.Fprintf(&sb, "app-id: %s\n", appID)
 	fmt.Fprintf(&sb, "environment: %s\n", envSlug)
-	if cfg.Organization != "" {
-		fmt.Fprintf(&sb, "organization: %s\n", cfg.Organization)
+	if orgSlug != "" {
+		fmt.Fprintf(&sb, "organization: %s\n", orgSlug)
 	}
-	if cfg.OrganizationID != "" {
-		fmt.Fprintf(&sb, "organization-id: %s\n", cfg.OrganizationID)
+	if orgID != "" {
+		fmt.Fprintf(&sb, "organization-id: %s\n", orgID)
 	}
 
 	if err := os.WriteFile("kagi.yaml", []byte(sb.String()), 0644); err != nil { //nolint:gosec // kagi.yaml is a non-secret, per-project binding (folder path, app ID, org) meant to be committed and shared; 0644 is intentional

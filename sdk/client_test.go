@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -177,6 +178,109 @@ func TestListCertificateFolderChildren(t *testing.T) {
 	}
 	if len(result.Folders) != 1 || result.Folders[0].Slug != "korur" {
 		t.Errorf("unexpected folders: %+v", result.Folders)
+	}
+}
+
+// newPagedServer serves a list endpoint that paginates in maxPageSize batches.
+// It slices allData by the requested ?page, asserts ?size=maxPageSize, and
+// records every page number it served so a test can assert the loop stopped.
+func newPagedServer(t *testing.T, wantPath string, allData []map[string]string, servedPages *[]int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != wantPath {
+			t.Errorf("unexpected path: got %s, want %s", r.URL.Path, wantPath)
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("size"); got != "200" {
+			t.Errorf("unexpected size param: got %q, want 200", got)
+		}
+		page := 0
+		fmt.Sscanf(r.URL.Query().Get("page"), "%d", &page)
+		*servedPages = append(*servedPages, page)
+
+		start := page * maxPageSize
+		end := start + maxPageSize
+		if start > len(allData) {
+			start = len(allData)
+		}
+		if end > len(allData) {
+			end = len(allData)
+		}
+		resp := map[string]interface{}{"data": allData[start:end], "message": "ok", "status": 200}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+}
+
+func TestListCertificates_PaginatesUntilShortPage(t *testing.T) {
+	// A full first page (maxPageSize rows) must trigger a second request; a short
+	// second page ends the loop. All rows across both pages are accumulated.
+	total := maxPageSize + 5
+	all := make([]map[string]string, total)
+	for i := range all {
+		all[i] = map[string]string{"id": fmt.Sprintf("c%d", i)}
+	}
+	var served []int
+	ts := newPagedServer(t, "/kagi/certificates", all, &served)
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-token")
+	result, err := client.ListCertificates(context.Background())
+	if err != nil {
+		t.Fatalf("ListCertificates returned error: %v", err)
+	}
+	if len(result) != total {
+		t.Fatalf("expected %d certificates, got %d", total, len(result))
+	}
+	if len(served) != 2 || served[0] != 0 || served[1] != 1 {
+		t.Errorf("expected pages [0 1] to be served, got %v", served)
+	}
+	if result[0].ID != "c0" || result[total-1].ID != fmt.Sprintf("c%d", total-1) {
+		t.Errorf("unexpected accumulation order: first=%s last=%s", result[0].ID, result[total-1].ID)
+	}
+}
+
+func TestListCertificates_SinglePageStops(t *testing.T) {
+	// A first page shorter than maxPageSize is the final page: exactly one request.
+	all := []map[string]string{{"id": "c1"}, {"id": "c2"}}
+	var served []int
+	ts := newPagedServer(t, "/kagi/certificates", all, &served)
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-token")
+	result, err := client.ListCertificates(context.Background())
+	if err != nil {
+		t.Fatalf("ListCertificates returned error: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected 2 certificates, got %d", len(result))
+	}
+	if len(served) != 1 {
+		t.Errorf("expected a single page request, got pages %v", served)
+	}
+}
+
+func TestListPasswordsInFolder_PaginatesUntilShortPage(t *testing.T) {
+	total := maxPageSize + 3
+	all := make([]map[string]string, total)
+	for i := range all {
+		all[i] = map[string]string{"id": fmt.Sprintf("p%d", i), "username": fmt.Sprintf("user%d", i)}
+	}
+	var served []int
+	ts := newPagedServer(t, "/kagi/folders/passwords/items/team", all, &served)
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-token")
+	result, err := client.ListPasswordsInFolder(context.Background(), "/team")
+	if err != nil {
+		t.Fatalf("ListPasswordsInFolder returned error: %v", err)
+	}
+	if len(result) != total {
+		t.Fatalf("expected %d passwords, got %d", total, len(result))
+	}
+	if len(served) != 2 {
+		t.Errorf("expected 2 page requests, got %v", served)
 	}
 }
 

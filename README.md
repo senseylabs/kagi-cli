@@ -262,6 +262,36 @@ kagi cert delete sensey-io
 `create` requires `--name` and `--cert-file`; `--key-file` is optional and
 `--path/-p` defaults to the root (`/`).
 
+## Passwords
+
+`kagi passwords` browses a password folder tree and reads stored credentials.
+Passwords carry no name — a credential is addressed by its login **username**. A
+leading-slash argument is a node path (folder segments then the username);
+anything else matches by username or id.
+
+```bash
+# Browse the passwords root / a folder
+kagi passwords
+kagi passwords /sensey
+
+# List every password (flat) with its folder path
+kagi passwords list
+
+# Show a password's metadata by node path, or by username/id
+kagi passwords get /sensey/admin
+kagi passwords get admin
+
+# Reveal the plaintext password value
+kagi passwords reveal admin
+kagi passwords reveal /sensey/admin
+
+# Audit history
+kagi passwords history admin
+```
+
+The password value is **masked everywhere** — in `browse`, `list`, `get`, and
+`history` output — and is only printed in the clear by `reveal`.
+
 ## Cluster issuers (workload identity)
 
 Register a Kubernetes cluster's OIDC issuer so its workloads can authenticate to
@@ -425,6 +455,18 @@ organization-id: 00000000-0000-0000-0000-000000000000   # active org UUID (heade
 `organization` / `organization-id` are managed by `kagi org use` and
 `kagi login`; you normally don't edit them by hand. The directory binding
 (`app-id`, `folder-path`, `environment`) is written by `kagi setup`.
+
+## Version
+
+```bash
+kagi version     # detailed build info
+kagi --version   # just the version string
+```
+
+`kagi version` prints the full build information — the version, the git commit
+it was built from, the build date, and the Go toolchain version. The global
+`kagi --version` flag prints only the version string (`kagi version <v>`), which
+`install.sh` / `install.ps1` parse.
 
 ## Go SDK
 

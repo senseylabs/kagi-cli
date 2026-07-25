@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -149,16 +150,14 @@ func (c *Client) FetchSecrets(ctx context.Context, appID, environmentSlug string
 	return resp.Data.Secrets, nil
 }
 
-// ListCertificates returns all certificates. A large page size is requested so
-// the single call returns every certificate rather than being truncated at the
-// backend's small default (@PageableDefault(size = 20)), mirroring the folder
-// certificate-items call.
+// ListCertificates returns all certificates. The backend clamps page size to
+// PageableSanitizer.DEFAULT_MAX_SIZE (200), so a single oversized request would
+// silently truncate at 200 rows; results are instead collected by paging in
+// maxPageSize-row batches until a short page marks the end.
 func (c *Client) ListCertificates(ctx context.Context) ([]CertificateListItem, error) {
-	var resp APIResponse[[]CertificateListItem]
-	if err := c.doGet(ctx, "/kagi/certificates?size=500&sort=name", &resp); err != nil {
-		return nil, err
-	}
-	return resp.Data, nil
+	return fetchAllPages[CertificateListItem](ctx, c, "certificates", func(page int) string {
+		return fmt.Sprintf("/kagi/certificates?page=%d&size=%d&sort=name", page, maxPageSize)
+	})
 }
 
 // GetCertificateDetail returns detailed metadata for a certificate.
@@ -192,14 +191,13 @@ func (c *Client) ListCertificateFolderChildren(ctx context.Context, path string)
 // ListCertificatesInFolder returns the certificates held directly inside the
 // certificate folder addressed by path. It hits
 // GET /kagi/folders/certificates/items/{*path}. An empty or "/" path lists the
-// certificates at the certificates root. A large page size is requested so the
-// browse returns every certificate in the folder in one call.
+// certificates at the certificates root. The backend clamps page size to 200,
+// so the folder is paged in maxPageSize-row batches until a short page marks the
+// end rather than trusting a single oversized request.
 func (c *Client) ListCertificatesInFolder(ctx context.Context, path string) ([]CertificateFolderItem, error) {
-	var resp APIResponse[[]CertificateFolderItem]
-	if err := c.doGet(ctx, certificateItemsPath(path), &resp); err != nil {
-		return nil, err
-	}
-	return resp.Data, nil
+	return fetchAllPages[CertificateFolderItem](ctx, c, "certificate folder items", func(page int) string {
+		return certificateItemsPath(path, page)
+	})
 }
 
 // ResolveCertificate resolves a human-entered certificate node path to the
@@ -248,15 +246,13 @@ func (c *Client) ListPasswordFolderChildren(ctx context.Context, path string) (*
 // ListPasswordsInFolder returns the passwords held directly inside the password
 // folder addressed by path, with masked values. It hits
 // GET /kagi/folders/passwords/items/{*path}. An empty or "/" path lists the
-// passwords at the passwords root. A large page size is requested so the browse
-// returns every password in the folder in one call (the endpoint paginates with
-// a small default). Results are sorted by username — the entity has no name.
+// passwords at the passwords root. The backend clamps page size to 200, so the
+// folder is paged in maxPageSize-row batches until a short page marks the end.
+// Results are sorted by username — the entity has no name.
 func (c *Client) ListPasswordsInFolder(ctx context.Context, path string) ([]PasswordListItem, error) {
-	var resp APIResponse[[]PasswordListItem]
-	if err := c.doGet(ctx, passwordItemsPath(path), &resp); err != nil {
-		return nil, err
-	}
-	return resp.Data, nil
+	return fetchAllPages[PasswordListItem](ctx, c, "password folder items", func(page int) string {
+		return passwordItemsPath(path, page)
+	})
 }
 
 // ResolvePassword resolves a human-entered password node path to the password's
@@ -339,13 +335,13 @@ func folderChildrenPath(library KagiLibrary, path string) string {
 	return "/kagi/folders/" + string(library) + "/children" + normalizeFolderPath(path)
 }
 
-// certificateItemsPath builds the folder-addressed certificate-items URL. Like
-// folderChildrenPath the route uses a terminal capturing wildcard, so the path
-// is appended last; an empty/"/" path lists the root. A large page size is
-// requested so the single call returns every certificate in the folder (the
-// endpoint paginates with a small default).
-func certificateItemsPath(path string) string {
-	return "/kagi/folders/certificates/items" + normalizeFolderPath(path) + "?size=500&sort=name"
+// certificateItemsPath builds the folder-addressed certificate-items URL for a
+// zero-based page. Like folderChildrenPath the route uses a terminal capturing
+// wildcard, so the path is appended last; an empty/"/" path lists the root. The
+// backend clamps size to 200, so the caller pages in maxPageSize-row batches.
+func certificateItemsPath(path string, page int) string {
+	return fmt.Sprintf("/kagi/folders/certificates/items%s?page=%d&size=%d&sort=name",
+		normalizeFolderPath(path), page, maxPageSize)
 }
 
 // certificateResolvePath builds the certificate node-path resolve URL. The route
@@ -355,14 +351,14 @@ func certificateResolvePath(path string) string {
 	return "/kagi/folders/certificates/resolve" + normalizeFolderPath(path)
 }
 
-// passwordItemsPath builds the folder-addressed password-items URL. Like
-// certificateItemsPath the route uses a terminal capturing wildcard, so the path
-// is appended last; an empty/"/" path lists the root. A large page size is
-// requested so the single call returns every password in the folder (the
-// endpoint paginates with a small default). Sort is by username because the
-// KagiPassword entity has no name property to sort on.
-func passwordItemsPath(path string) string {
-	return "/kagi/folders/passwords/items" + normalizeFolderPath(path) + "?size=500&sort=username"
+// passwordItemsPath builds the folder-addressed password-items URL for a
+// zero-based page. Like certificateItemsPath the route uses a terminal capturing
+// wildcard, so the path is appended last; an empty/"/" path lists the root. The
+// backend clamps size to 200, so the caller pages in maxPageSize-row batches.
+// Sort is by username because the KagiPassword entity has no name property.
+func passwordItemsPath(path string, page int) string {
+	return fmt.Sprintf("/kagi/folders/passwords/items%s?page=%d&size=%d&sort=username",
+		normalizeFolderPath(path), page, maxPageSize)
 }
 
 // normalizeFolderPath collapses a folder path to the canonical wildcard suffix:
@@ -374,6 +370,37 @@ func normalizeFolderPath(path string) string {
 		return ""
 	}
 	return "/" + trimmed
+}
+
+// maxPageSize is the largest page the backend will honor: PageableSanitizer
+// clamps any requested size to DEFAULT_MAX_SIZE (200), so a larger ?size is
+// silently reduced and truncates the result. List calls page in this size.
+const maxPageSize = 200
+
+// maxListPages bounds the pagination loop so an unexpectedly large (or
+// ever-growing) collection cannot spin forever. Reaching it logs a warning and
+// returns what was gathered so far.
+const maxListPages = 100
+
+// fetchAllPages walks Spring pages 0,1,2,... for a list endpoint, accumulating
+// rows until a page returns fewer than maxPageSize items (the final page) or the
+// page cap is hit. pathForPage builds the request path for a given zero-based
+// page number and must request size=maxPageSize. resource names the collection
+// for the cap-exceeded warning.
+func fetchAllPages[T any](ctx context.Context, c *Client, resource string, pathForPage func(page int) string) ([]T, error) {
+	var all []T
+	for page := 0; page < maxListPages; page++ {
+		var resp APIResponse[[]T]
+		if err := c.doGet(ctx, pathForPage(page), &resp); err != nil {
+			return nil, err
+		}
+		all = append(all, resp.Data...)
+		if len(resp.Data) < maxPageSize {
+			return all, nil
+		}
+	}
+	fmt.Fprintf(os.Stderr, "warning: kagi: %s list hit the %d-page cap; results may be truncated\n", resource, maxListPages)
+	return all, nil
 }
 
 // doGet performs an authenticated GET request, reads the response body, and

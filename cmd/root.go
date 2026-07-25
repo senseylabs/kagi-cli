@@ -108,6 +108,15 @@ func initConfig() {
 		cfgDevMode = true
 	}
 
+	// Stored URLs from a prior session are only a valid fallback when they are
+	// consistent with the current dev/prod mode. A stored dev session carries
+	// localhost URLs (with DevMode=true); those must NOT leak into a non-dev run.
+	// In particular an explicit `--dev=false` leaves cfgDevMode false, and without
+	// this guard the localhost APIURL/IssuerURL would win over the prod default
+	// (localhost is not "stale" per isStaleAPIURL/isStaleIssuer) and trap the user
+	// in dev. Ignoring the stored URLs here lets resolution fall through to prod.
+	storedURLsUsable := !storedCreds.DevMode || cfgDevMode
+
 	if cfgAPIURL == "" {
 		if v := os.Getenv("KAGI_API_URL"); v != "" {
 			cfgAPIURL = v
@@ -115,7 +124,7 @@ func initConfig() {
 			cfgAPIURL = cfg.APIURL
 		} else if cfgDevMode {
 			cfgAPIURL = devAPIURL
-		} else if storedCreds.APIURL != "" && !isStaleAPIURL(storedCreds.APIURL) {
+		} else if storedURLsUsable && storedCreds.APIURL != "" && !isStaleAPIURL(storedCreds.APIURL) {
 			cfgAPIURL = storedCreds.APIURL
 		} else {
 			cfgAPIURL = prodAPIURL
@@ -129,7 +138,7 @@ func initConfig() {
 			cfgIssuer = cfg.Issuer
 		} else if cfgDevMode {
 			cfgIssuer = devIssuer
-		} else if storedCreds.IssuerURL != "" && !isStaleIssuer(storedCreds.IssuerURL) {
+		} else if storedURLsUsable && storedCreds.IssuerURL != "" && !isStaleIssuer(storedCreds.IssuerURL) {
 			cfgIssuer = storedCreds.IssuerURL
 		} else {
 			cfgIssuer = prodIssuer

@@ -38,7 +38,6 @@ jobs:
         with:
           go-version-file: sdk/go.mod
           cache: true
-          cache-dependency-path: sdk/go.sum
 
       - name: go vet
         run: cd sdk && go vet ./...
@@ -57,6 +56,16 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - uses: golangci/golangci-lint-action@v6
+      # golangci-lint v2 to match .golangci.yml (version: "2"). The v6 action
+      # installs the v1 line, which rejects the v2 config; v7+ installs v2.
+      - uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          version: v2.1.6
+
+      # The sdk is a separate module; golangci-lint won't cross module
+      # boundaries, so lint it from within sdk/. The root .golangci.yml is
+      # discovered by walking up the tree, so the same config applies.
+      - uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.1.6
+          working-directory: sdk

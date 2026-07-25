@@ -88,6 +88,62 @@ func TestPollForTokenGivesUpAfterMaxTransientErrors(t *testing.T) {
 	}
 }
 
+// A 5xx that arrives mid-poll (e.g. a proxy's bare HTML 502/503, or a JSON 5xx)
+// must be tolerated as a transient server blip, not treated as a fatal
+// "unexpected response". Polling continues within the expiry budget and
+// eventually succeeds.
+func TestPollForTokenToleratesServerErrors(t *testing.T) {
+	rt := &fakeRoundTripper{
+		fn: func(call int, req *http.Request) (*http.Response, error) {
+			switch call {
+			case 1:
+				// Bare HTML body from a proxy: fails JSON parsing.
+				return jsonResponse(http.StatusBadGateway, "<html><body>502 Bad Gateway</body></html>"), nil
+			case 2:
+				// Structured JSON 5xx.
+				return jsonResponse(http.StatusServiceUnavailable, `{"error":"temporarily_unavailable"}`), nil
+			default:
+				return jsonResponse(http.StatusOK,
+					`{"access_token":"at","refresh_token":"rt","token_type":"Bearer","expires_in":3600}`), nil
+			}
+		},
+	}
+	df := newFakeDeviceFlow(rt)
+
+	resp, err := df.PollForToken("https://issuer.example/token", "devcode",
+		time.Millisecond, time.Now().Add(10*time.Second))
+	if err != nil {
+		t.Fatalf("expected success after 5xx blips; got %v", err)
+	}
+	if resp.AccessToken != "at" {
+		t.Errorf("unexpected access token %q", resp.AccessToken)
+	}
+	if rt.calls != 3 {
+		t.Errorf("expected 3 attempts (502 + 503 + success); got %d", rt.calls)
+	}
+}
+
+// A persistent 5xx must give up after the bounded number of consecutive
+// attempts, sharing the transientErrors budget with transport failures rather
+// than looping until expiry.
+func TestPollForTokenGivesUpAfterMaxServerErrors(t *testing.T) {
+	rt := &fakeRoundTripper{
+		fn: func(call int, req *http.Request) (*http.Response, error) {
+			return jsonResponse(http.StatusServiceUnavailable, `{"error":"temporarily_unavailable"}`), nil
+		},
+	}
+	df := newFakeDeviceFlow(rt)
+
+	_, err := df.PollForToken("https://issuer.example/token", "devcode",
+		time.Millisecond, time.Now().Add(time.Hour))
+	if err == nil {
+		t.Fatal("expected an error after exhausting the transient budget on 5xx")
+	}
+	if rt.calls != maxPollTransientErrors {
+		t.Errorf("expected exactly %d attempts; got %d", maxPollTransientErrors, rt.calls)
+	}
+}
+
 // authorization_pending must be treated as "keep polling", not an error.
 func TestPollForTokenPendingThenSuccess(t *testing.T) {
 	rt := &fakeRoundTripper{

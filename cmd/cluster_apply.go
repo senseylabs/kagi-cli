@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 
 	"github.com/senseylabs/kagi-cli/internal/client"
@@ -231,9 +232,22 @@ func runClusterApply(cmd *cobra.Command, args []string) error {
 
 	if clusterApplyPrune {
 		toPrune := bindingsToPrune(issuer, existingBindings, desiredKeys)
-		if len(toPrune) > 0 && !clusterApplyYes {
-			u.Warn("--prune will delete %d workload binding(s) on issuer %q that are absent from the file.", len(toPrune), issuer.DisplayName)
+		switch decidePruneGate(len(toPrune), clusterApplyYes, term.IsTerminal(int(os.Stdin.Fd()))) {
+		case pruneProceed:
+			// Authorized via --yes, or nothing to prune — fall through to the delete.
+		case pruneBlocked:
+			// A --prune run that has bindings to delete but neither --yes nor an
+			// interactive terminal must NOT silently skip: doing so would exit 0
+			// (reporting success) in CI while the revoked bindings keep their secret
+			// access. Show the plan, then fail with a non-zero, actionable error.
+			printPrunePlan(u, issuer, toPrune)
+			return fmt.Errorf("--prune must delete %d workload binding(s) but stdin is not a terminal to confirm on; re-run with --yes to authorize pruning non-interactively", len(toPrune))
+		case prunePrompt:
+			// Interactive: show exactly which bindings are at stake, then confirm.
+			// An explicit decline is a deliberate, clean skip.
+			printPrunePlan(u, issuer, toPrune)
 			if !u.Confirm("Proceed with pruning these bindings?") {
+				u.Info("Pruning declined — %d binding(s) left in place.", len(toPrune))
 				return nil
 			}
 		}
@@ -243,6 +257,44 @@ func runClusterApply(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// pruneGate is how a requested --prune proceeds once the bindings to delete are known.
+type pruneGate int
+
+const (
+	// pruneProceed: authorized to prune without a prompt — either --yes was given
+	// or there is nothing to prune.
+	pruneProceed pruneGate = iota
+	// prunePrompt: an interactive terminal is available, so confirm before pruning.
+	prunePrompt
+	// pruneBlocked: bindings need pruning but there is no --yes and no terminal to
+	// confirm on — the run must fail rather than silently skip the prune.
+	pruneBlocked
+)
+
+// decidePruneGate encodes the CI-safety rule for --prune: a run with bindings to
+// delete and neither --yes nor an interactive stdin is BLOCKED (a hard error),
+// never silently skipped. With --yes (or nothing to prune) it proceeds; on a TTY
+// without --yes it prompts. It is pure so the security-critical rule is unit-testable.
+func decidePruneGate(toPrune int, yes, interactive bool) pruneGate {
+	if toPrune == 0 || yes {
+		return pruneProceed
+	}
+	if interactive {
+		return prunePrompt
+	}
+	return pruneBlocked
+}
+
+// printPrunePlan lists, to stderr, the bindings a --prune run would delete so the
+// operator sees exactly what is at stake before confirming or being blocked.
+func printPrunePlan(u *ui.UI, issuer *client.ClusterIssuer, toPrune []client.WorkloadBinding) {
+	u.Warn("--prune will delete %d workload binding(s) on issuer %q that are absent from the file:", len(toPrune), issuer.DisplayName)
+	for i := range toPrune {
+		b := toPrune[i]
+		u.Warn("  - %s/%s (id %s)", b.Namespace, b.ServiceAccount, b.ID)
+	}
 }
 
 // bindingKey is the (namespace, serviceAccount) identity used to match a desired

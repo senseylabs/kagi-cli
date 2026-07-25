@@ -37,8 +37,12 @@ vet:
 	go vet ./...
 	cd sdk && go vet ./...
 
+# Lint both modules. golangci-lint won't cross module boundaries, so the sdk/
+# module is linted from within sdk/; the root .golangci.yml is discovered by
+# walking up the tree, so the same config applies.
 lint:
 	golangci-lint run
+	cd sdk && golangci-lint run
 
 fmt:
 	gofmt -w .

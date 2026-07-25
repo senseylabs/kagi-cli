@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -73,10 +74,12 @@ func runTokenList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// ID shrinks first — it is the least human-meaningful column but the one a
-	// revoke needs, so keep it present and let the name/type stay readable.
+	// The UUID id column is kept full-width and non-truncatable: `token revoke`
+	// needs the exact id this list prints, so on a narrow terminal the human-
+	// readable NAME (recoverable from context) gives up width instead — a
+	// truncated id could not drive a revoke.
 	table := ui.NewTable("NAME", "ID", "TYPE", "EXPIRES", "LAST USED").
-		SetTruncatable(1, 0)
+		SetTruncatable(0, 0)
 	for _, t := range tokens {
 		expires := t.ExpiresAt
 		if expires == "" {
@@ -102,20 +105,59 @@ func runTokenRevoke(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	id := args[0]
+	// Resolve the reference against the token list so an unambiguous id prefix
+	// works — the truncated ids `token list` prints on a narrow terminal used to
+	// be unusable here; now both the full id and a unique prefix revoke, matching
+	// `cluster delete` and `workload delete`.
+	tokens, err := vc.ListAccessTokens()
+	if err != nil {
+		return fmt.Errorf("failed to list access tokens: %w", err)
+	}
+	token, err := matchAccessToken(tokens, args[0])
+	if err != nil {
+		return err
+	}
 
 	if !tokenRevokeYes {
-		if !u.Confirm(fmt.Sprintf("Revoke access token %q? This cannot be undone.", id)) {
+		if !u.Confirm(fmt.Sprintf("Revoke access token %q (id %s)? This cannot be undone.", token.Name, token.ID)) {
 			return nil
 		}
 	}
 
-	if err := vc.RevokeAccessToken(id); err != nil {
+	if err := vc.RevokeAccessToken(token.ID); err != nil {
 		return fmt.Errorf("failed to revoke access token: %w", err)
 	}
 
-	u.Success("Revoked access token %s.", id)
+	u.Success("Revoked access token %q (%s).", token.Name, token.ID)
 	return nil
+}
+
+// matchAccessToken resolves a token reference — an exact id or an unambiguous id
+// prefix — against an already-fetched token list, mirroring the id-prefix
+// resolution used by `cluster delete` and `workload delete`. An exact id always
+// wins; otherwise a lone prefix match is returned, an ambiguous prefix errors
+// listing the candidate ids, and no match errors with a list hint.
+func matchAccessToken(tokens []client.AccessToken, ref string) (*client.AccessToken, error) {
+	for i := range tokens {
+		if tokens[i].ID == ref {
+			return &tokens[i], nil
+		}
+	}
+	var match *client.AccessToken
+	var candidates []string
+	for i := range tokens {
+		if strings.HasPrefix(tokens[i].ID, ref) {
+			match = &tokens[i]
+			candidates = append(candidates, tokens[i].ID)
+		}
+	}
+	if len(candidates) > 1 {
+		return nil, fmt.Errorf("access token reference %q is ambiguous — it matches %d ids: %s. Use the full id", ref, len(candidates), strings.Join(candidates, ", "))
+	}
+	if match != nil {
+		return match, nil
+	}
+	return nil, fmt.Errorf("access token %q not found. List tokens with 'kagi token list'", ref)
 }
 
 // completeTokenIDs offers the caller's access token ids (with the token name as

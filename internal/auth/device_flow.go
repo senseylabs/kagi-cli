@@ -236,11 +236,18 @@ func (d *DeviceFlow) PollForToken(tokenEndpoint, deviceCode string, interval tim
 // PollForTokenContext polls the token endpoint until the user completes
 // authentication, the device code expires, or ctx is canceled.
 //
-// Transient network failures (a request that never got a response, or a body
-// that could not be read) do not abort the flow: they are tolerated up to
+// Transient failures do not abort the flow: they are tolerated up to
 // maxPollTransientErrors consecutive occurrences within the expiry budget, so a
-// momentary blip while the user is authorizing doesn't kill the login. The poll
-// interval is grown on slow_down per RFC 8628 but capped at maxPollInterval so a
+// momentary blip while the user is authorizing doesn't kill the login. Three
+// kinds count against that budget: a request that never got a response, a body
+// that could not be read, and a response that arrived with a 5xx status. That
+// last case matters because a proxy in front of Keycloak can return a bare HTML
+// 502/503 mid-flow; treating it as fatal would abort an otherwise healthy login.
+// This mirrors httpx.GetWithRetry (which retries 502/503/504) and RefreshToken's
+// TokenEndpointError.Transient() (which retries any >=500). Only a <500 non-200
+// OAuth response (authorization_pending / slow_down / access_denied /
+// expired_token / a definitive 4xx) is acted on immediately. The poll interval
+// is grown on slow_down per RFC 8628 but capped at maxPollInterval so a
 // misbehaving server cannot push it up without bound.
 func (d *DeviceFlow) PollForTokenContext(ctx context.Context, tokenEndpoint, deviceCode string, interval time.Duration, expiresAt time.Time) (*TokenResponse, error) {
 	data := url.Values{
@@ -302,16 +309,33 @@ func (d *DeviceFlow) PollForTokenContext(ctx context.Context, tokenEndpoint, dev
 			continue
 		}
 
-		// A response came back; reset the transient-failure budget.
-		transientErrors = 0
-
 		if resp.StatusCode == http.StatusOK {
+			// A definitive success reached us; parse the token and return.
 			var tokenResp TokenResponse
 			if err := json.Unmarshal(body, &tokenResp); err != nil {
 				return nil, fmt.Errorf("failed to parse token response: %w", err)
 			}
 			return &tokenResp, nil
 		}
+
+		// A 5xx that arrived is a server-side blip (a proxy's bare HTML 502/503,
+		// or a JSON 5xx), not an OAuth decision the user can act on. Count it
+		// against the same transientErrors budget as a transport failure and keep
+		// polling within the expiry deadline. Without this, an HTML 5xx body fails
+		// json.Unmarshal below and hits "unexpected response", and a JSON 5xx falls
+		// through to the fatal default — either one aborting a healthy login.
+		if resp.StatusCode >= 500 {
+			transientErrors++
+			if transientErrors >= maxPollTransientErrors {
+				return nil, fmt.Errorf("token endpoint returned server error %d after %d attempts: %s",
+					resp.StatusCode, transientErrors, strings.TrimSpace(string(body)))
+			}
+			continue
+		}
+
+		// A definitive <500 non-200 OAuth response reached us; reset the transient
+		// budget and interpret the error code.
+		transientErrors = 0
 
 		var errResp TokenErrorResponse
 		if err := json.Unmarshal(body, &errResp); err != nil {

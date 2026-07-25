@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -475,22 +476,56 @@ func (c *KagiClient) DeleteSecret(appID, envSlug, secretID string) error {
 	return err
 }
 
+// maxPageSize is the largest page the backend will honor: PageableSanitizer
+// clamps any requested size to DEFAULT_MAX_SIZE (200), so a larger ?size is
+// silently reduced and truncates the result. List calls page in this size.
+const maxPageSize = 200
+
+// maxListPages bounds a pagination loop so an unexpectedly large (or
+// ever-growing) collection cannot spin forever. Reaching it logs a warning and
+// returns what was gathered so far.
+const maxListPages = 100
+
+// maxTokenFolders bounds the access-token folder walk for the same reason: a
+// pathological folder tree cannot make the traversal run unbounded.
+const maxTokenFolders = 500
+
+// fetchAllPages walks Spring pages 0,1,2,... for a list endpoint, accumulating
+// rows until a page returns fewer than maxPageSize items (the final page) or the
+// page cap is hit. pathForPage builds the request path for a given zero-based
+// page number and must request size=maxPageSize. resource names the collection
+// for the cap-exceeded warning and for parse errors.
+func fetchAllPages[T any](c *KagiClient, resource string, pathForPage func(page int) string) ([]T, error) {
+	var all []T
+	for page := 0; page < maxListPages; page++ {
+		body, err := c.doRequest("GET", pathForPage(page))
+		if err != nil {
+			return nil, err
+		}
+
+		var resp kagi.APIResponse[[]T]
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return nil, fmt.Errorf("failed to parse %s list response: %w", resource, err)
+		}
+
+		all = append(all, resp.Data...)
+		if len(resp.Data) < maxPageSize {
+			return all, nil
+		}
+	}
+	fmt.Fprintf(os.Stderr, "warning: %s list hit the %d-page cap; results may be truncated\n", resource, maxListPages)
+	return all, nil
+}
+
 // ListSecrets returns all secrets for an app's environment with masked values.
-// An explicit large page size is sent because the backend paginates with a
-// default of 20; without it, list/get/delete would only ever see the first
-// page and miss keys beyond it.
+// The backend clamps page size to 200 (PageableSanitizer.DEFAULT_MAX_SIZE), so
+// a single oversized request would silently truncate; the secrets are instead
+// paged in maxPageSize-row batches so list/get/delete see every key.
 func (c *KagiClient) ListSecrets(appID, envSlug string) ([]SecretListItem, error) {
-	body, err := c.doRequest("GET", secretsBasePath(appID, envSlug)+"?size=1000")
-	if err != nil {
-		return nil, err
-	}
-
-	var resp kagi.APIResponse[[]SecretListItem]
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("failed to parse secrets list response: %w", err)
-	}
-
-	return resp.Data, nil
+	base := secretsBasePath(appID, envSlug)
+	return fetchAllPages[SecretListItem](c, "secrets", func(page int) string {
+		return fmt.Sprintf("%s?page=%d&size=%d", base, page, maxPageSize)
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -591,32 +626,93 @@ func (c *KagiClient) DeleteCertificate(certID string) error {
 // AccessToken is a Kagi personal access token as returned by the folder-addressed
 // list endpoint. The token hash/plaintext is never exposed. FolderID is empty for
 // a token not yet folder-addressed, and ExpiresAt is empty for a token that never
-// expires.
+// expires. FolderPath is the human-readable path of the folder the token was
+// listed from ("/" for the root/null-folder bucket); it is filled in by the
+// folder-tree walk, not returned by the backend.
 type AccessToken struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	CreatedByID string `json:"createdById"`
 	TokenType   string `json:"tokenType"`
 	FolderID    string `json:"folderId"`
+	FolderPath  string `json:"folderPath"`
 	ExpiresAt   string `json:"expiresAt"`
 	CreatedAt   string `json:"createdAt"`
 }
 
-// ListAccessTokens returns the caller's access tokens. An explicit large page
-// size is sent because the backend paginates with a default of 20; without it,
-// the list would be truncated to the first page.
+// accessTokenItemsPath builds the folder-addressed access-token items URL for a
+// zero-based page. The route uses a terminal capturing wildcard, so the folder
+// path is appended last; an empty/"/" folderPath addresses the root (which is
+// also the null-folder bucket for tokens not yet folder-addressed). The backend
+// clamps size to 200, so callers page in maxPageSize-row batches.
+func accessTokenItemsPath(folderPath string, page int) string {
+	base := "/kagi/folders/access-tokens/items"
+	suffix := ""
+	if trimmed := strings.Trim(folderPath, "/"); trimmed != "" {
+		suffix = "/" + trimmed
+	}
+	return fmt.Sprintf("%s%s?page=%d&size=%d&sort=name", base, suffix, page, maxPageSize)
+}
+
+// ListAccessTokens returns ALL of the caller's access tokens across the entire
+// access-token folder tree, each tagged with its FolderPath. The root
+// /items listing only ever returns root/null-folder tokens, so this walks the
+// folder tree (mirroring how passwords and certificates browse folders): for
+// each folder it pages the tokens held directly inside it, then descends into
+// that folder's children. Subfolder and null-folder tokens would otherwise be
+// invisible — and therefore unrevokable — from the CLI.
 func (c *KagiClient) ListAccessTokens() ([]AccessToken, error) {
-	body, err := c.doRequest("GET", "/kagi/folders/access-tokens/items/?size=1000")
-	if err != nil {
-		return nil, err
+	ctx := context.Background()
+	var all []AccessToken
+
+	// Breadth-first walk of the folder tree. "" is the root, which doubles as
+	// the null-folder bucket for tokens not yet folder-addressed.
+	queue := []string{""}
+	for visited := 0; len(queue) > 0; visited++ {
+		if visited >= maxTokenFolders {
+			fmt.Fprintf(os.Stderr, "warning: access-token folder walk hit the %d-folder cap; some tokens may be missing\n", maxTokenFolders)
+			break
+		}
+
+		folderPath := queue[0]
+		queue = queue[1:]
+
+		displayPath := folderPath
+		if displayPath == "" {
+			displayPath = "/"
+		}
+
+		items, err := fetchAllPages[AccessToken](c, "access tokens", func(page int) string {
+			return accessTokenItemsPath(folderPath, page)
+		})
+		if err != nil {
+			return nil, err
+		}
+		for i := range items {
+			items[i].FolderPath = displayPath
+		}
+		all = append(all, items...)
+
+		children, err := c.sdkClient.ListFolderChildren(ctx, kagi.LibraryAccessTokens, folderPath)
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range children.Folders {
+			queue = append(queue, joinTokenFolderPath(folderPath, f.Slug))
+		}
 	}
 
-	var resp kagi.APIResponse[[]AccessToken]
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("failed to parse access tokens list response: %w", err)
-	}
+	return all, nil
+}
 
-	return resp.Data, nil
+// joinTokenFolderPath appends a child folder slug to a parent access-token
+// folder path, yielding an absolute path with a single leading slash. The root
+// ("" or "/") yields "/slug".
+func joinTokenFolderPath(base, slug string) string {
+	if trimmed := strings.Trim(base, "/"); trimmed != "" {
+		return "/" + trimmed + "/" + slug
+	}
+	return "/" + slug
 }
 
 // RevokeAccessToken revokes (soft-deletes) an access token by its stable id.
