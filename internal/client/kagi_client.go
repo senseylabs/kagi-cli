@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"time"
 
 	kagi "github.com/senseylabs/kagi-sdk"
@@ -46,25 +46,18 @@ type KagiClient struct {
 	token      string
 	sdkClient  *kagi.Client
 
-	// orgID is the active organization UUID, sent as X-Organization-ID on JWT
-	// (human) write requests. Empty under PAT auth.
+	// orgID is the active organization UUID, sent as X-Organization-ID on write
+	// requests. Empty until an organization has been selected.
 	orgID string
-	// isPAT reports whether token came from KAGI_TOKEN (a Personal Access
-	// Token). When true the org header is never sent — the org is bound to the
-	// token server-side and a mismatched header returns 403.
-	isPAT bool
 }
-
-// IsPAT reports whether this client authenticates with a Personal Access Token.
-func (c *KagiClient) IsPAT() bool { return c.isPAT }
 
 // OrgID returns the active organization UUID configured for JWT requests.
 func (c *KagiClient) OrgID() string { return c.orgID }
 
-// NewKagiClientWithToken creates a client with an explicit PAT (used during the
-// login flow to call read-only org endpoints before an org is selected). The
-// token is treated as a JWT so the org header may be attached if orgID is set;
-// pass an empty orgID for the org-discovery call right after device login.
+// NewKagiClientWithToken creates a client with an explicit JWT (used during the
+// login flow to call read-only org endpoints before an org is selected). Pass an
+// empty orgID for the org-discovery call right after device login; the org
+// header is attached only once an org is known.
 func NewKagiClientWithToken(baseURL, token string) *KagiClient {
 	return &KagiClient{
 		baseURL: baseURL,
@@ -72,7 +65,7 @@ func NewKagiClientWithToken(baseURL, token string) *KagiClient {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		sdkClient: kagi.NewOrgClient(baseURL, token, "", false),
+		sdkClient: kagi.NewOrgClient(baseURL, token, ""),
 	}
 }
 
@@ -86,18 +79,9 @@ func NewKagiClient(baseURL, issuerURL string) (*KagiClient, error) {
 		},
 	}
 
-	// Check KAGI_TOKEN env var first (PAT for CI). A PAT is org-bound
-	// server-side, so we never attach X-Organization-ID — sending a mismatched
-	// org would be rejected with 403 (confused-deputy guard).
-	if pat := os.Getenv("KAGI_TOKEN"); pat != "" {
-		c.token = pat
-		c.isPAT = true
-		c.sdkClient = kagi.NewOrgClient(baseURL, pat, "", true)
-		return c, nil
-	}
-
-	// JWT (human) auth resolves the active org from the X-Organization-ID
-	// header, sourced from the persisted config (set via `kagi org use`).
+	// Auth resolves solely from the stored JWT session. The active org is sent
+	// via the X-Organization-ID header, sourced from the persisted config (set
+	// via `kagi org use`).
 	cfg := config.Load()
 	c.orgID = cfg.OrganizationID
 
@@ -140,7 +124,7 @@ func NewKagiClient(baseURL, issuerURL string) (*KagiClient, error) {
 		// treat as a breach and revoke the whole token family.
 		fresh, loadErr := store.Load()
 		if loadErr != nil {
-			return nil, fmt.Errorf("session expired. Run 'kagi login' to re-authenticate")
+			return nil, fmt.Errorf("could not read stored credentials: %w", loadErr)
 		}
 		creds = fresh
 
@@ -157,14 +141,14 @@ func NewKagiClient(baseURL, issuerURL string) (*KagiClient, error) {
 			endpoints, err := deviceFlow.DiscoverEndpoints(discoverCtx)
 			discoverCancel()
 			if err != nil {
-				return nil, fmt.Errorf("session expired. Run 'kagi login' to re-authenticate")
+				return nil, classifyRefreshError(err)
 			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			newToken, err := deviceFlow.RefreshToken(ctx, endpoints.TokenEndpoint, creds.RefreshToken)
 			cancel()
 			if err != nil {
-				return nil, fmt.Errorf("session expired. Run 'kagi login' to re-authenticate")
+				return nil, classifyRefreshError(err)
 			}
 
 			creds.AccessToken = newToken.AccessToken
@@ -184,8 +168,22 @@ func NewKagiClient(baseURL, issuerURL string) (*KagiClient, error) {
 	}
 
 	c.token = creds.AccessToken
-	c.sdkClient = kagi.NewOrgClient(baseURL, creds.AccessToken, c.orgID, false)
+	c.sdkClient = kagi.NewOrgClient(baseURL, creds.AccessToken, c.orgID)
 	return c, nil
+}
+
+// classifyRefreshError turns a discovery/refresh failure on the routine
+// token-refresh path into an actionable message. A definite authentication
+// failure — invalid_grant / an HTTP 4xx from the token endpoint — means the
+// session is truly gone and the user must re-login. Anything else (a transient
+// 5xx, a transport blip, or an OIDC discovery failure) is worth retrying and
+// must not be mislabeled as an expired session.
+func classifyRefreshError(err error) error {
+	var tee *auth.TokenEndpointError
+	if errors.As(err, &tee) && !tee.Transient() {
+		return fmt.Errorf("session expired. Run 'kagi login' to re-authenticate")
+	}
+	return fmt.Errorf("temporary problem reaching the login server, try again: %w", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -287,83 +285,21 @@ type SecretRevealResponse struct {
 // Write operations — stay in the CLI client (not in the read-only SDK)
 // ---------------------------------------------------------------------------
 
+// doRequest sends a bodyless HTTP request and returns the response bytes.
 func (c *KagiClient) doRequest(method, path string) ([]byte, error) {
-	if err := c.requireOrgForJWT(); err != nil {
-		return nil, err
-	}
-
-	url := c.baseURL + path
-	req, err := http.NewRequest(method, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	c.setAuthHeaders(req)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		if httpx.IsRetryable(err) {
-			return nil, fmt.Errorf("could not connect to %s. Check your network or if the API is running", c.baseURL)
-		}
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response from %s: %w", url, err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var apiErr APIErrorResponse
-		if json.Unmarshal(body, &apiErr) == nil && apiErr.Message != "" {
-			return nil, fmt.Errorf("%s", apiErr.Message)
-		}
-
-		switch resp.StatusCode {
-		case 401:
-			return nil, fmt.Errorf("unauthorized. Run 'kagi login' to authenticate")
-		case 403:
-			return nil, fmt.Errorf("access denied. You may not have permission for this operation")
-		case 404:
-			return nil, fmt.Errorf("resource not found")
-		case 500:
-			return nil, fmt.Errorf("server error. Try again later")
-		default:
-			bodyStr := string(body)
-			if len(bodyStr) > 200 {
-				bodyStr = bodyStr[:200] + "..."
-			}
-			return nil, fmt.Errorf("request failed (%d): %s", resp.StatusCode, bodyStr)
-		}
-	}
-
-	return body, nil
+	return c.do(method, path, nil)
 }
 
-// setAuthHeaders sets the Authorization + Content-Type headers and, for JWT
-// (human) auth only, the X-Organization-ID header. PAT auth omits the org
-// header — the org is bound to the token and a mismatch returns 403.
-func (c *KagiClient) setAuthHeaders(req *http.Request) {
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Content-Type", "application/json")
-	if !c.isPAT && c.orgID != "" {
-		req.Header.Set(kagi.HeaderOrganizationID, c.orgID)
-	}
-}
-
-// requireOrgForJWT fails fast on JWT (human) write requests when no active
-// organization has been selected, rather than letting the backend reject the
-// request opaquely. PAT auth is exempt — the org is bound to the token.
-func (c *KagiClient) requireOrgForJWT() error {
-	if !c.isPAT && c.orgID == "" {
-		return fmt.Errorf("no organization selected. Run 'kagi org use <slug>' (see 'kagi org list')")
-	}
-	return nil
-}
-
-// doRequestWithBody sends an HTTP request with a JSON body and returns the response bytes.
+// doRequestWithBody sends an HTTP request with a JSON body and returns the
+// response bytes.
 func (c *KagiClient) doRequestWithBody(method, path string, payload interface{}) ([]byte, error) {
+	return c.do(method, path, payload)
+}
+
+// do is the shared request core behind doRequest and doRequestWithBody. It
+// enforces requireOrgForJWT, marshals an optional JSON payload, attaches the
+// auth headers, and maps transport and non-2xx failures to friendly errors.
+func (c *KagiClient) do(method, path string, payload interface{}) ([]byte, error) {
 	if err := c.requireOrgForJWT(); err != nil {
 		return nil, err
 	}
@@ -389,7 +325,7 @@ func (c *KagiClient) doRequestWithBody(method, path string, payload interface{})
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if httpx.IsRetryable(err) {
-			return nil, fmt.Errorf("could not connect to %s. Check your network or if the API is running", c.baseURL)
+			return nil, fmt.Errorf("could not connect to %s. Check your network or if the API is running: %w", c.baseURL, err)
 		}
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -401,30 +337,55 @@ func (c *KagiClient) doRequestWithBody(method, path string, payload interface{})
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var apiErr APIErrorResponse
-		if json.Unmarshal(body, &apiErr) == nil && apiErr.Message != "" {
-			return nil, fmt.Errorf("%s", apiErr.Message)
-		}
-
-		switch resp.StatusCode {
-		case 401:
-			return nil, fmt.Errorf("unauthorized. Run 'kagi login' to authenticate")
-		case 403:
-			return nil, fmt.Errorf("access denied. You may not have permission for this operation")
-		case 404:
-			return nil, fmt.Errorf("resource not found")
-		case 500:
-			return nil, fmt.Errorf("server error. Try again later")
-		default:
-			bodyStr := string(body)
-			if len(bodyStr) > 200 {
-				bodyStr = bodyStr[:200] + "..."
-			}
-			return nil, fmt.Errorf("request failed (%d): %s", resp.StatusCode, bodyStr)
-		}
+		return nil, mapHTTPError(resp.StatusCode, body)
 	}
 
 	return body, nil
+}
+
+// mapHTTPError turns a non-2xx status + body into a friendly error. The backend
+// envelope message wins when present; otherwise a per-status fallback is used.
+func mapHTTPError(status int, body []byte) error {
+	var apiErr APIErrorResponse
+	if json.Unmarshal(body, &apiErr) == nil && apiErr.Message != "" {
+		return fmt.Errorf("%s", apiErr.Message)
+	}
+
+	switch status {
+	case 401:
+		return fmt.Errorf("unauthorized. Run 'kagi login' to authenticate")
+	case 403:
+		return fmt.Errorf("access denied. You may not have permission for this operation")
+	case 404:
+		return fmt.Errorf("resource not found")
+	case 500:
+		return fmt.Errorf("server error. Try again later")
+	default:
+		bodyStr := string(body)
+		if len(bodyStr) > 200 {
+			bodyStr = bodyStr[:200] + "..."
+		}
+		return fmt.Errorf("request failed (%d): %s", status, bodyStr)
+	}
+}
+
+// setAuthHeaders sets the Authorization + Content-Type headers and, once an
+// organization has been selected, the X-Organization-ID header.
+func (c *KagiClient) setAuthHeaders(req *http.Request) {
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	if c.orgID != "" {
+		req.Header.Set(kagi.HeaderOrganizationID, c.orgID)
+	}
+}
+
+// requireOrgForJWT fails fast on write requests when no active organization has
+// been selected, rather than letting the backend reject the request opaquely.
+func (c *KagiClient) requireOrgForJWT() error {
+	if c.orgID == "" {
+		return fmt.Errorf("no organization selected. Run 'kagi org use <slug>' (see 'kagi org list')")
+	}
+	return nil
 }
 
 // secretsBasePath builds the folder-model secrets base URL for an app's
@@ -435,9 +396,6 @@ func secretsBasePath(appID, envSlug string) string {
 
 // SetSecrets performs a bulk upsert of secrets for an app's environment,
 // addressed by the stable app ID and the environment slug.
-//
-// NOTE: writes require human (JWT) auth — a KAGI_TOKEN PAT is read-only at the
-// backend and a write returns 403.
 func (c *KagiClient) SetSecrets(appID, envSlug string, secrets map[string]string) error {
 	type secretEntry struct {
 		KeyName string `json:"keyName"`
@@ -480,8 +438,11 @@ func (c *KagiClient) DeleteSecret(appID, envSlug, secretID string) error {
 }
 
 // ListSecrets returns all secrets for an app's environment with masked values.
+// An explicit large page size is sent because the backend paginates with a
+// default of 20; without it, list/get/delete would only ever see the first
+// page and miss keys beyond it.
 func (c *KagiClient) ListSecrets(appID, envSlug string) ([]SecretListItem, error) {
-	body, err := c.doRequest("GET", secretsBasePath(appID, envSlug))
+	body, err := c.doRequest("GET", secretsBasePath(appID, envSlug)+"?size=1000")
 	if err != nil {
 		return nil, err
 	}

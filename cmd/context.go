@@ -16,8 +16,8 @@ import (
 // personalEnvSlug is the reserved environment slug for a user's personal
 // environment. The backend addresses it as a normal environment by this slug
 // (GET/POST /kagi/apps/{appId}/environments/personal/secrets...). It is
-// user-scoped: available to human (JWT) callers only, never to machine/CI
-// (PAT) tokens. The --personal flag is sugar for --env personal.
+// user-scoped to the logged-in session. The --personal flag is sugar for
+// --env personal.
 const personalEnvSlug = "personal"
 
 // resolvedContext holds the resolved folder-model addressing for a secret
@@ -92,16 +92,6 @@ func resolveAppEnvWith(cmd *cobra.Command, vc *client.KagiClient, opts resolveOp
 	}
 	if envSlug == "" {
 		return nil, fmt.Errorf("environment not specified. Use --env flag or run 'kagi setup' to create a kagi.yaml")
-	}
-
-	// PAT guard: the personal environment is user-scoped and rejected by the
-	// backend for machine/CI (PAT) tokens. Fail fast with an actionable message
-	// before any network call, whether personal was requested via --personal or
-	// --env personal. This stays a HARD ERROR even for run/pull — the personal
-	// fallback below never applies to a PAT, so CI can never silently drift onto
-	// a shared environment.
-	if vc.IsPAT() && strings.EqualFold(envSlug, personalEnvSlug) {
-		return nil, fmt.Errorf("personal secrets are user-scoped and not available to machine/CI (PAT) tokens; run with a user login ('kagi login') or select a shared environment")
 	}
 
 	// Resolve the app ID. Priority: explicit --app-id, then --path resolution,
@@ -271,10 +261,11 @@ func classifyAppError(err error, label string) error {
 }
 
 // isStatus reports whether the SDK error carries the given HTTP status. The SDK
-// formats non-2xx responses as "kagi: API returned status N: ...", so a
-// substring check is sufficient and keeps the SDK surface small.
+// returns a typed *kagi.APIError for non-2xx responses, so classification is by
+// errors.As on that type rather than by matching the error text.
 func isStatus(err error, status int) bool {
-	return err != nil && strings.Contains(err.Error(), fmt.Sprintf("status %d", status))
+	var apiErr *kagi.APIError
+	return errors.As(err, &apiErr) && apiErr.Status == status
 }
 
 // addSecretFlags adds the folder-model addressing flags to a command:
@@ -282,12 +273,12 @@ func isStatus(err error, status int) bool {
 //	--path      human folder/app path, resolved once to the app ID
 //	--app-id    the app's stable internal ID (skips path resolution)
 //	--env       environment slug
-//	--personal  sugar for --env personal (user login only, not PAT)
+//	--personal  sugar for --env personal
 //
 // All override the kagi.yaml binding for the single invocation.
 func addSecretFlags(cmd *cobra.Command) {
 	cmd.Flags().StringP("path", "p", "", "Folder/app path, e.g. /village/kaizen (overrides kagi.yaml)")
 	cmd.Flags().String("app-id", "", "App ID — the stable machine binding (overrides --path and kagi.yaml)")
 	cmd.Flags().StringP("env", "e", "", "Environment slug (overrides kagi.yaml)")
-	cmd.Flags().Bool("personal", false, "Target your personal environment (sugar for --env personal; requires a user login, not a PAT)")
+	cmd.Flags().Bool("personal", false, "Target your personal environment (sugar for --env personal)")
 }

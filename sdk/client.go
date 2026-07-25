@@ -12,8 +12,7 @@ import (
 )
 
 // HeaderOrganizationID is the request header carrying the active organization
-// UUID. It is sent only for JWT (human) auth — for PAT auth the org is bound to
-// the token server-side and sending a mismatched header would be rejected (403).
+// UUID. It is sent whenever the client has an active organization configured.
 const HeaderOrganizationID = "X-Organization-ID"
 
 // Client is a read-only HTTP client for the Kagi secrets management API.
@@ -22,16 +21,13 @@ type Client struct {
 	token      string
 	httpClient *http.Client
 
-	// orgID is the active organization UUID, sent as X-Organization-ID on JWT
-	// requests. Empty for PAT auth (the org is bound to the token).
+	// orgID is the active organization UUID, sent as X-Organization-ID on every
+	// request when set.
 	orgID string
-	// isPAT reports whether token is a Personal Access Token. When true the
-	// org header is never sent — the backend rejects a mismatched header (403).
-	isPAT bool
-	// orgAware is set by NewOrgClient for JWT auth. When true an empty orgID on
-	// an org-scoped request fails fast (ErrNoOrganizationSelected) rather than
-	// being sent without a header. The bare NewClient leaves this false so it
-	// stays unopinionated for callers that manage org context themselves.
+	// orgAware is set by NewOrgClient. When true an empty orgID on an org-scoped
+	// request fails fast (ErrNoOrganizationSelected) rather than being sent
+	// without a header. The bare NewClient leaves this false so it stays
+	// unopinionated for callers that manage org context themselves.
 	orgAware bool
 }
 
@@ -55,21 +51,17 @@ func NewClient(baseURL, token string) *Client {
 // NewOrgClient creates an organization-aware Kagi SDK client.
 //
 // orgID is the active organization UUID, sent as the X-Organization-ID header
-// on every request when isPAT is false (JWT / human auth). When isPAT is true
-// the token already carries its org server-side, so no header is sent — sending
-// a mismatched one would be rejected with 403 (the confused-deputy guard).
-func NewOrgClient(baseURL, token, orgID string, isPAT bool) *Client {
+// on every request when non-empty. The returned client is org-aware: an
+// org-scoped request with no org selected fails fast with
+// ErrNoOrganizationSelected rather than being sent without a header.
+func NewOrgClient(baseURL, token, orgID string) *Client {
 	c := NewClient(baseURL, token)
 	c.orgID = orgID
-	c.isPAT = isPAT
-	// JWT clients are org-aware: an org-scoped request with no org selected
-	// fails fast. PAT clients never need a selected org (token-bound).
-	c.orgAware = !isPAT
+	c.orgAware = true
 	return c
 }
 
 // ListOrganizations returns the organizations the authenticated user belongs to.
-// Intended for JWT (human) auth; PAT auth is scoped to a single token-bound org.
 func (c *Client) ListOrganizations(ctx context.Context) ([]Organization, error) {
 	var resp APIResponse[[]Organization]
 	if err := c.doGet(ctx, "/kagi/organizations", &resp); err != nil {
@@ -157,10 +149,13 @@ func (c *Client) FetchSecrets(ctx context.Context, appID, environmentSlug string
 	return resp.Data.Secrets, nil
 }
 
-// ListCertificates returns all certificates.
+// ListCertificates returns all certificates. A large page size is requested so
+// the single call returns every certificate rather than being truncated at the
+// backend's small default (@PageableDefault(size = 20)), mirroring the folder
+// certificate-items call.
 func (c *Client) ListCertificates(ctx context.Context) ([]CertificateListItem, error) {
 	var resp APIResponse[[]CertificateListItem]
-	if err := c.doGet(ctx, "/kagi/certificates", &resp); err != nil {
+	if err := c.doGet(ctx, "/kagi/certificates?size=500&sort=name", &resp); err != nil {
 		return nil, err
 	}
 	return resp.Data, nil
@@ -296,9 +291,8 @@ func (c *Client) doGet(ctx context.Context, path string, result any) error {
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/json")
 
-	// JWT (human) auth resolves the active org from this header. PAT auth must
-	// NOT send it — the org is bound to the token and a mismatch returns 403.
-	if !c.isPAT && c.orgID != "" {
+	// The active org is resolved from this header when configured.
+	if c.orgID != "" {
 		req.Header.Set(HeaderOrganizationID, c.orgID)
 	}
 
@@ -314,7 +308,7 @@ func (c *Client) doGet(ctx context.Context, path string, result any) error {
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("kagi: API returned status %d: %s", resp.StatusCode, string(body))
+		return newAPIError(resp.StatusCode, body)
 	}
 
 	if err := json.Unmarshal(body, result); err != nil {

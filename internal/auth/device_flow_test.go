@@ -252,3 +252,28 @@ func TestRefreshTokenSuccess(t *testing.T) {
 		t.Errorf("unexpected token response %+v", resp)
 	}
 }
+
+func TestTokenEndpointErrorTransient(t *testing.T) {
+	cases := []struct {
+		name string
+		err  TokenEndpointError
+		want bool
+	}{
+		{"transport status 0", TokenEndpointError{Status: 0, Code: "transport"}, true},
+		{"server 503", TokenEndpointError{Status: 503, Code: "temporarily_unavailable"}, true},
+		{"invalid_grant 400", TokenEndpointError{Status: 400, Code: "invalid_grant"}, false},
+		{"forbidden 403", TokenEndpointError{Status: 403, Code: "access_denied"}, false},
+		// Body-read failure after a non-5xx status line (e.g. a connection reset
+		// mid-body on a 200) keeps the real status but carries Code "transport";
+		// it must be treated as transient, not "session expired".
+		{"body-read failure on 200", TokenEndpointError{Status: 200, Code: "transport"}, true},
+		{"body-read failure on 400", TokenEndpointError{Status: 400, Code: "transport"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.err.Transient(); got != tc.want {
+				t.Errorf("Transient() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

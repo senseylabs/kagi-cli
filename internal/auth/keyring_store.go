@@ -19,9 +19,9 @@ const (
 // ErrNoCredentials is the sentinel returned by a store's Load when no
 // credentials have been saved yet. It wraps the underlying not-found errors of
 // both backends (keyring.ErrNotFound and fs.ErrNotExist) so callers can detect
-// first-run with errors.Is regardless of which backend is active. The returned
-// error message keeps the literal substring "no credentials found" for the
-// legacy substring check in cmd/root.go until that call migrates to errors.Is.
+// first-run with errors.Is regardless of which backend is active. cmd/root.go
+// detects first-run via errors.Is(err, ErrNoCredentials); the message also keeps
+// the literal "no credentials found" text for human readability.
 var ErrNoCredentials = errors.New("no credentials found")
 
 // keyringProbeTimeout bounds the availability probe of the OS secret service.

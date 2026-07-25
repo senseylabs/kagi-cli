@@ -81,10 +81,14 @@ func (e *TokenEndpointError) Error() string {
 func (e *TokenEndpointError) Unwrap() error { return e.err }
 
 // Transient reports whether the failure looks worth retrying: a transport
-// failure (Status 0) or any server-side 5xx. A 4xx — most importantly
-// invalid_grant / HTTP 400 — is a real auth failure and is not transient.
+// failure (Status 0, or a body-read failure that never yielded a usable
+// response — both carry Code "transport") or any server-side 5xx. A 4xx —
+// most importantly invalid_grant / HTTP 400 — is a real auth failure and is
+// not transient. Note the "transport" check: a connection reset mid-body can
+// arrive after a non-5xx status line, and that is still a transport blip worth
+// retrying, not a reason to force the user to re-login.
 func (e *TokenEndpointError) Transient() bool {
-	return e.Status == 0 || e.Status >= 500
+	return e.Status == 0 || e.Status >= 500 || e.Code == "transport"
 }
 
 // OIDCEndpoints holds the discovered OpenID Connect endpoints.

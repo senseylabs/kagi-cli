@@ -345,34 +345,16 @@ func TestOrgHeader_SentForJWT(t *testing.T) {
 	ts := orgHeaderServer(t, &gotHeader, &present)
 	defer ts.Close()
 
-	client := NewOrgClient(ts.URL, "jwt-token", "org-uuid-123", false /* isPAT */)
+	client := NewOrgClient(ts.URL, "jwt-token", "org-uuid-123")
 	if _, err := client.ListEnvironments(context.Background(), "app-1"); err != nil {
 		t.Fatalf("ListEnvironments returned error: %v", err)
 	}
 
 	if !present {
-		t.Fatalf("expected %s header to be sent for JWT auth, but it was absent", HeaderOrganizationID)
+		t.Fatalf("expected %s header to be sent, but it was absent", HeaderOrganizationID)
 	}
 	if gotHeader != "org-uuid-123" {
 		t.Errorf("unexpected %s header: got %q, want %q", HeaderOrganizationID, gotHeader, "org-uuid-123")
-	}
-}
-
-func TestOrgHeader_NotSentForPAT(t *testing.T) {
-	var gotHeader string
-	var present bool
-	ts := orgHeaderServer(t, &gotHeader, &present)
-	defer ts.Close()
-
-	// Even with an orgID supplied, a PAT client must NOT send the header — the
-	// org is bound to the token and a mismatch would be rejected with 403.
-	client := NewOrgClient(ts.URL, "vv_pat_token", "org-uuid-123", true /* isPAT */)
-	if _, err := client.ListEnvironments(context.Background(), "app-1"); err != nil {
-		t.Fatalf("ListEnvironments returned error: %v", err)
-	}
-
-	if present {
-		t.Errorf("expected %s header to be absent for PAT auth, but got %q", HeaderOrganizationID, gotHeader)
 	}
 }
 
@@ -386,7 +368,7 @@ func TestOrgScopedRequest_FailsFastWhenNoOrgSelected(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client := NewOrgClient(ts.URL, "jwt-token", "", false /* isPAT */)
+	client := NewOrgClient(ts.URL, "jwt-token", "")
 	_, err := client.ListEnvironments(context.Background(), "app-1")
 	if err == nil {
 		t.Fatal("expected ErrNoOrganizationSelected, got nil")
@@ -406,7 +388,7 @@ func TestListOrganizations_AllowedWithoutOrgSelected(t *testing.T) {
 	ts := newTestServer(t, "/kagi/organizations", orgs)
 	defer ts.Close()
 
-	client := NewOrgClient(ts.URL, "test-token", "", false /* isPAT */)
+	client := NewOrgClient(ts.URL, "test-token", "")
 	result, err := client.ListOrganizations(context.Background())
 	if err != nil {
 		t.Fatalf("ListOrganizations returned error: %v", err)
@@ -418,7 +400,7 @@ func TestListOrganizations_AllowedWithoutOrgSelected(t *testing.T) {
 
 func TestPlainClient_NotOrgGated(t *testing.T) {
 	// The bare NewClient is unopinionated: an empty orgID does not fail-fast and
-	// no org header is sent (back-compat for existing callers / PAT-style usage).
+	// no org header is sent (for callers that manage org context themselves).
 	var present bool
 	var gotHeader string
 	ts := orgHeaderServer(t, &gotHeader, &present)
@@ -447,6 +429,37 @@ func TestErrorHandling_Non200(t *testing.T) {
 	}
 	if got := err.Error(); got == "" {
 		t.Error("error message should not be empty")
+	}
+}
+
+func TestErrorHandling_APIError(t *testing.T) {
+	// A non-2xx response carrying the backend CustomResponse envelope must yield
+	// a typed *APIError whose Status, Code (from error.code), and Message
+	// (top-level message) are populated and reachable via errors.As.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"success": false, "message": "organization mismatch", "data": null, "pagination": null, "error": {"code": "KGI_TEN_004", "message": "tenant/org mismatch"}}`))
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-token")
+	_, err := client.ListEnvironments(context.Background(), "app-1")
+	if err == nil {
+		t.Fatal("expected error for 403 response, got nil")
+	}
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIError, got %T: %v", err, err)
+	}
+	if apiErr.Status != http.StatusForbidden {
+		t.Errorf("unexpected status: got %d, want %d", apiErr.Status, http.StatusForbidden)
+	}
+	if apiErr.Code != "KGI_TEN_004" {
+		t.Errorf("unexpected code: got %q, want %q", apiErr.Code, "KGI_TEN_004")
+	}
+	if apiErr.Message != "organization mismatch" {
+		t.Errorf("unexpected message: got %q, want %q", apiErr.Message, "organization mismatch")
 	}
 }
 

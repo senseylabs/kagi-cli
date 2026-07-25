@@ -25,9 +25,8 @@ var clusterCmd = &cobra.Command{
 		"  kagi cluster update <id|url> --name x   update a cluster issuer's name, JWKS, or enabled flag\n" +
 		"  kagi cluster rm <id|url>                remove a cluster issuer\n" +
 		"  kagi cluster apply -f trust.yaml        reconcile issuers + workload bindings declaratively\n\n" +
-		"Credential: prefer 'kagi login' (a user in an org ADMIN/OWNER role). A KAGI_TOKEN\n" +
-		"PAT works too but is org-admin-equivalent for these writes — use a short-lived one\n" +
-		"in CI only. JWT writes require an active org: run 'kagi org use <slug>' first.",
+		"Credential: log in with 'kagi login' as a user in an org ADMIN/OWNER role. These\n" +
+		"writes require an active org: run 'kagi org use <slug>' first.",
 }
 
 var (

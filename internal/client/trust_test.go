@@ -49,15 +49,15 @@ func newTrustTestServer(t *testing.T, captured *capturedRequest, responseData an
 	}))
 }
 
-// newTrustTestClient builds a client pointed at the test server. It uses PAT auth
-// (isPAT) so requests are network-free and self-contained: the org header is
-// bound to the token server-side, so no X-Organization-ID setup is needed.
+// newTrustTestClient builds a client pointed at the test server. An active org
+// is set so requireOrgForJWT passes and the X-Organization-ID header is sent,
+// keeping the write paths self-contained without any network setup.
 func newTrustTestClient(ts *httptest.Server) *KagiClient {
 	return &KagiClient{
 		baseURL:    ts.URL,
 		token:      "test-token",
 		httpClient: ts.Client(),
-		isPAT:      true,
+		orgID:      "org-test",
 	}
 }
 

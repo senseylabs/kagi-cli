@@ -6,6 +6,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	kagi "github.com/senseylabs/kagi-sdk"
+
 	"github.com/senseylabs/kagi-cli/internal/client"
 	"github.com/senseylabs/kagi-cli/internal/config"
 	"github.com/spf13/cobra"
@@ -17,10 +19,7 @@ var orgCmd = &cobra.Command{
 	Long: "List the organizations you belong to and choose which one the CLI acts in.\n" +
 		"  kagi org list           list your organizations\n" +
 		"  kagi org use <slug>     set the active organization\n" +
-		"  kagi org current        show the active organization\n\n" +
-		"Organization selection applies to human (JWT) login only. A KAGI_TOKEN\n" +
-		"(Personal Access Token) is already bound to a single organization, so no\n" +
-		"selection is needed or possible when KAGI_TOKEN is set.",
+		"  kagi org current        show the active organization",
 }
 
 var orgListCmd = &cobra.Command{
@@ -49,19 +48,7 @@ func init() {
 	rootCmd.AddCommand(orgCmd)
 }
 
-// rejectPATForOrgSelection blocks org list/use/current under PAT auth, where the
-// org is bound to the token and cannot be chosen client-side.
-func rejectPATForOrgSelection() error {
-	if os.Getenv("KAGI_TOKEN") != "" {
-		return fmt.Errorf("organization selection does not apply when KAGI_TOKEN is set — a Personal Access Token is already bound to a single organization")
-	}
-	return nil
-}
-
 func runOrgList(cmd *cobra.Command, args []string) error {
-	if err := rejectPATForOrgSelection(); err != nil {
-		return err
-	}
 	if err := requireAuth(); err != nil {
 		return err
 	}
@@ -96,9 +83,6 @@ func runOrgList(cmd *cobra.Command, args []string) error {
 }
 
 func runOrgUse(cmd *cobra.Command, args []string) error {
-	if err := rejectPATForOrgSelection(); err != nil {
-		return err
-	}
 	if err := requireAuth(); err != nil {
 		return err
 	}
@@ -136,13 +120,9 @@ func runOrgUse(cmd *cobra.Command, args []string) error {
 }
 
 func runOrgCurrent(cmd *cobra.Command, args []string) error {
-	if err := rejectPATForOrgSelection(); err != nil {
-		return err
-	}
-
 	cfg := config.Load()
 	if cfg.OrganizationID == "" {
-		return fmt.Errorf("no organization selected. Run 'kagi org use <slug>' to choose one (see 'kagi org list')")
+		return kagi.ErrNoOrganizationSelected
 	}
 
 	if cfg.Organization != "" {

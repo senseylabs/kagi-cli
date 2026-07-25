@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -44,7 +45,7 @@ func SetVersion(v string) {
 var rootCmd = &cobra.Command{
 	Use:   "kagi",
 	Short: "Kagi CLI — secrets management for Sensey",
-	Long:  "A CLI tool for managing secrets in Kagi. Supports Keycloak Device Authorization Grant for interactive login and Personal Access Tokens for CI/CD.",
+	Long:  "A CLI tool for managing secrets in Kagi. Authenticate once with 'kagi login' (Keycloak Device Authorization Grant); scripts and agents act through that same logged-in session.",
 }
 
 func Execute() {
@@ -68,8 +69,9 @@ func initConfig() {
 	store := auth.NewTokenStore()
 	storedCreds, err := store.Load()
 	if err != nil {
-		// "no credentials found" is expected on first run — only warn on unexpected errors
-		if !strings.Contains(err.Error(), "no credentials found") {
+		// A missing credential store is expected on first run — only warn on
+		// unexpected errors.
+		if !errors.Is(err, auth.ErrNoCredentials) {
 			fmt.Fprintf(os.Stderr, "Warning: could not load stored credentials: %v\n", err)
 		}
 	}
@@ -144,12 +146,18 @@ func isStaleAPIURL(url string) bool {
 }
 
 func requireAuth() error {
+	// KAGI_TOKEN (Personal Access Token) authentication has been removed: the CLI
+	// authenticates only via the logged-in session from 'kagi login'. Fail loudly
+	// rather than silently ignoring a stale PAT the caller believes is in effect.
 	if os.Getenv("KAGI_TOKEN") != "" {
-		return nil
+		return fmt.Errorf("the CLI no longer authenticates with KAGI_TOKEN (Personal Access Tokens). Run 'kagi login' and unset KAGI_TOKEN")
 	}
 	store := auth.NewTokenStore()
 	if _, err := store.Load(); err != nil {
-		return fmt.Errorf("you are not logged in. Run 'kagi login' to authenticate")
+		if errors.Is(err, auth.ErrNoCredentials) {
+			return fmt.Errorf("you are not logged in. Run 'kagi login' to authenticate")
+		}
+		return fmt.Errorf("could not read stored credentials: %w", err)
 	}
 	return nil
 }
