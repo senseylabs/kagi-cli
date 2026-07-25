@@ -11,19 +11,29 @@ import (
 
 type fileStore struct {
 	path string
+	// locateErr is set when the store could not be located (home directory
+	// unresolvable). It is surfaced from every operation so we never silently
+	// write plaintext credentials to a relative path in the current directory.
+	locateErr error
 }
 
 // newFileStore returns the plaintext file-backed fallback store used when no OS
 // secret service is available. It is unexported: callers reach it through
 // NewTokenStore, which decides between the keyring and this fallback.
 func newFileStore() *fileStore {
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return &fileStore{locateErr: fmt.Errorf("cannot store credentials: home directory unavailable: %w", err)}
+	}
 	return &fileStore{
 		path: filepath.Join(home, ".kagi", "credentials"),
 	}
 }
 
 func (f *fileStore) Save(creds Credentials) error {
+	if f.locateErr != nil {
+		return f.locateErr
+	}
 	dir := filepath.Dir(f.path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create credentials directory: %w", err)
@@ -73,6 +83,9 @@ func (f *fileStore) Save(creds Credentials) error {
 }
 
 func (f *fileStore) Load() (Credentials, error) {
+	if f.locateErr != nil {
+		return Credentials{}, f.locateErr
+	}
 	data, err := os.ReadFile(f.path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -92,6 +105,9 @@ func (f *fileStore) Load() (Credentials, error) {
 }
 
 func (f *fileStore) Delete() error {
+	if f.locateErr != nil {
+		return f.locateErr
+	}
 	if err := os.Remove(f.path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to delete credentials: %w", err)
 	}

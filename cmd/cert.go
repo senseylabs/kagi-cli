@@ -1,13 +1,11 @@
 package cmd
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
@@ -248,10 +246,26 @@ func walkCertTree(vc *client.KagiClient, path string, out *[]certPathEntry) erro
 // and the certificates directly under it. Mirrors `kagi secrets [path]`, but the
 // certificate leaves are fetched from the dedicated /items endpoint because the
 // certificates children listing carries folders only.
+// certBrowseEntry is the per-node payload for `kagi cert [path]` in json/yaml
+// mode: a folder or certificate directly under the browsed path, with its full
+// node path.
+type certBrowseEntry struct {
+	Type    string `json:"type" yaml:"type"`
+	Name    string `json:"name" yaml:"name"`
+	Slug    string `json:"slug" yaml:"slug"`
+	Path    string `json:"path" yaml:"path"`
+	Expires string `json:"expires,omitempty" yaml:"expires,omitempty"`
+}
+
 func runCertBrowse(cmd *cobra.Command, args []string) error {
+	format, err := outputFormat()
+	if err != nil {
+		return err
+	}
 	if err := requireAuth(); err != nil {
 		return err
 	}
+	u := newUI()
 
 	vc, err := client.NewKagiClient(cfgAPIURL, cfgIssuer)
 	if err != nil {
@@ -273,20 +287,30 @@ func runCertBrowse(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(children.Folders) == 0 && len(certs) == 0 {
-		fmt.Printf("No folders or certificates under %q.\n", path)
-		return nil
+		if format == ui.FormatTable {
+			u.Info("No folders or certificates under %q.", path)
+			return nil
+		}
+		return u.Print(format, []certBrowseEntry{}, nil)
 	}
 
 	base := strings.TrimRight(path, "/")
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "TYPE\tNAME\tSLUG\tPATH\tEXPIRES")
+	// The wide columns — the node path and the expiry date — are marked
+	// truncatable so rows stay one line on a narrow terminal; the full values are
+	// always available via -o json/yaml (piped output is never truncated).
+	payload := make([]certBrowseEntry, 0, len(children.Folders)+len(certs))
+	table := ui.NewTable("TYPE", "NAME", "SLUG", "PATH", "EXPIRES")
+	table.SetTruncatable(3, 0)
+	table.SetTruncatable(4, 1)
 	for _, f := range children.Folders {
-		fmt.Fprintf(w, "folder\t%s\t%s\t%s\t%s\n", f.Name, f.Slug, base+"/"+f.Slug, "")
+		payload = append(payload, certBrowseEntry{Type: "folder", Name: f.Name, Slug: f.Slug, Path: base + "/" + f.Slug})
+		table.AddRow("folder", f.Name, f.Slug, base+"/"+f.Slug, "")
 	}
 	for _, c := range certs {
-		fmt.Fprintf(w, "cert\t%s\t%s\t%s\t%s\n", c.Name, c.Slug, base+"/"+c.Slug, c.NotAfter)
+		payload = append(payload, certBrowseEntry{Type: "cert", Name: c.Name, Slug: c.Slug, Path: base + "/" + c.Slug, Expires: c.NotAfter})
+		table.AddRow("cert", c.Name, c.Slug, base+"/"+c.Slug, c.NotAfter)
 	}
-	return w.Flush()
+	return u.Print(format, payload, table)
 }
 
 // resolveCertRef turns a CLI argument into a certificate id and display name. A
@@ -317,7 +341,7 @@ func resolveCertRef(vc *client.KagiClient, arg string) (id string, name string, 
 func lookupCertPath(vc *client.KagiClient, certID string) string {
 	var entries []certPathEntry
 	if err := walkCertTree(vc, "/", &entries); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not resolve certificate path: %v\n", err)
+		newUI().Warn("Could not resolve certificate path: %v", err)
 		return ""
 	}
 	for _, e := range entries {
@@ -515,6 +539,7 @@ func runCertReveal(cmd *cobra.Command, args []string) error {
 	if err := requireAuth(); err != nil {
 		return err
 	}
+	u := newUI()
 
 	vc, err := client.NewKagiClient(cfgAPIURL, cfgIssuer)
 	if err != nil {
@@ -531,9 +556,11 @@ func runCertReveal(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to reveal certificate: %w", err)
 	}
 
-	fmt.Print(revealed.CertificateContent)
+	// The PEM material is data — it must stay on stdout so it can be piped or
+	// redirected to a file.
+	fmt.Fprint(u.Out(), revealed.CertificateContent)
 	if revealed.PrivateKeyContent != "" {
-		fmt.Print(revealed.PrivateKeyContent)
+		fmt.Fprint(u.Out(), revealed.PrivateKeyContent)
 	}
 	return nil
 }
@@ -542,6 +569,7 @@ func runCertUpdate(cmd *cobra.Command, args []string) error {
 	if err := requireAuth(); err != nil {
 		return err
 	}
+	u := newUI()
 
 	vc, err := client.NewKagiClient(cfgAPIURL, cfgIssuer)
 	if err != nil {
@@ -572,7 +600,7 @@ func runCertUpdate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to update certificate: %w", err)
 	}
 
-	fmt.Printf("Updated certificate %q (thumbprint: %s).\n", updated.Name, updated.Thumbprint)
+	u.Success("Updated certificate %q (thumbprint: %s).", updated.Name, updated.Thumbprint)
 	return nil
 }
 
@@ -580,6 +608,7 @@ func runCertDelete(cmd *cobra.Command, args []string) error {
 	if err := requireAuth(); err != nil {
 		return err
 	}
+	u := newUI()
 
 	vc, err := client.NewKagiClient(cfgAPIURL, cfgIssuer)
 	if err != nil {
@@ -591,17 +620,8 @@ func runCertDelete(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Confirm deletion
 	if !certDeleteYes {
-		fmt.Printf("Are you sure you want to delete certificate %q? This cannot be undone. [y/N]: ", certName)
-		reader := bufio.NewReader(os.Stdin)
-		input, err := reader.ReadString('\n')
-		if err != nil {
-			return fmt.Errorf("failed to read input: %w", err)
-		}
-		input = strings.TrimSpace(strings.ToLower(input))
-		if input != "y" && input != "yes" {
-			fmt.Println("Aborted.")
+		if !u.Confirm(fmt.Sprintf("Delete certificate %q? This cannot be undone.", certName)) {
 			return nil
 		}
 	}
@@ -610,14 +630,19 @@ func runCertDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to delete certificate: %w", err)
 	}
 
-	fmt.Printf("Deleted certificate %q.\n", certName)
+	u.Success("Deleted certificate %q.", certName)
 	return nil
 }
 
 func runCertHistory(cmd *cobra.Command, args []string) error {
+	format, err := outputFormat()
+	if err != nil {
+		return err
+	}
 	if err := requireAuth(); err != nil {
 		return err
 	}
+	u := newUI()
 
 	vc, err := client.NewKagiClient(cfgAPIURL, cfgIssuer)
 	if err != nil {
@@ -635,14 +660,22 @@ func runCertHistory(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(history) == 0 {
-		fmt.Println("No history found.")
-		return nil
+		if format == ui.FormatTable {
+			u.Info("No history found.")
+			return nil
+		}
+		return u.Print(format, []client.CertificateHistory{}, nil)
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "DATE\tCHANGE TYPE\tTHUMBPRINT\tEXPIRES\tCHANGED BY")
+	// The wide columns — the timestamps and the thumbprint — are marked
+	// truncatable so rows stay one line on a narrow terminal; the full values are
+	// always available via -o json/yaml (piped output is never truncated).
+	table := ui.NewTable("DATE", "CHANGE TYPE", "THUMBPRINT", "EXPIRES", "CHANGED BY")
+	table.SetTruncatable(2, 0)
+	table.SetTruncatable(0, 1)
+	table.SetTruncatable(3, 2)
 	for _, h := range history {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", h.CreatedAt, h.ChangeType, h.Thumbprint, h.NotAfter, h.ChangedBy)
+		table.AddRow(h.CreatedAt, h.ChangeType, h.Thumbprint, h.NotAfter, h.ChangedBy)
 	}
-	return w.Flush()
+	return u.Print(format, history, table)
 }

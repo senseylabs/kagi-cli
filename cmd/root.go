@@ -51,9 +51,11 @@ var rootCmd = &cobra.Command{
 		"  kagi setup --path /village/kaizen --env prod\n" +
 		"  kagi secrets list\n" +
 		"  kagi secrets get DATABASE_URL",
-	// SilenceUsage stops Cobra from dumping the full usage/help text after every
-	// operational error (a failed API call is not a usage mistake). Usage is still
-	// shown for genuine argument/flag errors, which Cobra reports before RunE.
+	// SilenceUsage stops Cobra from dumping the full usage/help screen after an
+	// error — a failed API call is not a usage mistake, and the screen buries the
+	// one line that matters. Errors (including arg/flag errors, which stay concise
+	// and self-describing, e.g. "accepts 1 arg(s), received 0") print as a single
+	// "Error: ..." line; run `kagi <command> --help` for usage.
 	SilenceUsage: true,
 }
 
