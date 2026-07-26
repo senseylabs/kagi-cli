@@ -135,8 +135,10 @@ func (u *UI) pickInteractive(title string, ordered []PickItem, opts PickOptions)
 	}()
 
 	filter := ""
+	filterBefore := "" // filter snapshot taken when entering filter mode, restored on Esc
 	cursor := 0
-	prevAbove := -1 // -1 => nothing drawn yet
+	filtering := false // false = nav mode (vim keys); true = filter mode (typing)
+	prevAbove := -1    // -1 => nothing drawn yet
 
 	erase := func() {
 		if prevAbove >= 0 {
@@ -154,35 +156,113 @@ func (u *UI) pickInteractive(title string, ordered []PickItem, opts PickOptions)
 	for {
 		filtered := filterPickItems(ordered, filter)
 		cursor = clamp(cursor, 0, len(filtered)-1)
-		prevAbove = u.drawPicker(title, filtered, cursor, filter, opts.AllowUp, prevAbove)
+		prevAbove = u.drawPicker(title, filtered, cursor, filter, filtering, opts.AllowUp, prevAbove)
+
+		// Half-page step, recomputed each frame so it tracks terminal resizes and
+		// scales to the visible item window rather than the whole screen.
+		_, height := u.pickerSize()
+		halfPage := (height - 4) / 2
+		if halfPage < 1 {
+			halfPage = 1
+		}
 
 		b, err := u.in.ReadByte()
-		if err != nil { // EOF (e.g. Ctrl-D on some setups, or closed stdin)
+		if err != nil { // EOF (closed stdin)
 			return done(PickQuit, PickItem{})
 		}
 
-		switch b {
-		case ctrlC, ctrlD:
-			return done(PickQuit, PickItem{})
-		case keyCR, keyLF:
+		open := func() (PickResult, error, bool) {
 			if len(filtered) > 0 {
-				return done(PickSelected, filtered[cursor])
+				r, e := done(PickSelected, filtered[cursor])
+				return r, e, true
 			}
-		case keyBackspace, keyDEL:
-			if filter != "" {
-				filter = trimLastRune(filter)
+			return PickResult{}, nil, false
+		}
+
+		if filtering {
+			// FILTER MODE: keystrokes build the filter; Enter applies it and Esc
+			// restores the filter as it was on entering the mode (so refining an
+			// applied filter and then canceling keeps the applied one). Arrows move.
+			switch b {
+			case ctrlC:
+				return done(PickQuit, PickItem{})
+			case keyCR, keyLF:
+				filtering = false // apply the filter, back to nav
+			case ctrlU:
+				filter = "" // clear the typed filter, stay in filter mode
 				cursor = 0
-			} else if opts.AllowUp {
+			case keyBackspace, keyDEL:
+				if filter != "" {
+					filter = trimLastRune(filter)
+					cursor = 0
+				} else {
+					filtering = false // backspace on an empty filter exits filter mode
+				}
+			case ctrlN:
+				cursor++
+			case ctrlP:
+				cursor--
+			case keyEsc:
+				if u.in.Buffered() == 0 {
+					// Esc cancels the edit: restore the filter to what it was on
+					// entering the mode and return to nav.
+					filter = filterBefore
+					filtering = false
+					cursor = 0
+				} else {
+					switch u.readEscapeFinal() {
+					case 'A':
+						cursor--
+					case 'B':
+						cursor++
+					}
+				}
+			default:
+				if r, ok := u.readFilterRune(b); ok {
+					filter += string(r)
+					cursor = 0
+				}
+			}
+			continue
+		}
+
+		// NAV MODE: vim-style movement; `/` enters filter mode.
+		switch b {
+		case ctrlC, 'q':
+			return done(PickQuit, PickItem{})
+		case '/':
+			filterBefore = filter // so Esc can restore it if the edit is canceled
+			filtering = true
+			cursor = 0
+		case 'j', ctrlN:
+			cursor++
+		case 'k', ctrlP:
+			cursor--
+		case 'g':
+			cursor = 0
+		case 'G':
+			cursor = len(filtered) - 1
+		case ctrlD:
+			cursor += halfPage
+		case ctrlU:
+			cursor -= halfPage
+		case 'h':
+			if opts.AllowUp {
 				return done(PickGoUp, PickItem{})
 			}
-		case ctrlN:
-			cursor++
-		case ctrlP:
-			cursor--
+		case 'l', keyCR, keyLF:
+			if r, e, ok := open(); ok {
+				return r, e
+			}
+		case keyBackspace, keyDEL:
+			if filter != "" { // clear an applied filter
+				filter = ""
+				cursor = 0
+			}
 		case keyEsc:
-			// A lone Esc quits; an Esc that begins a CSI/SS3 sequence (arrow and
-			// other keys) arrives with its remaining bytes already buffered, so a
-			// zero buffer means the key really was Esc.
+			// A lone Esc quits; an Esc that begins a CSI/SS3 sequence (arrow keys)
+			// arrives with its remaining bytes already buffered, so a zero buffer
+			// means the key really was Esc.
 			if u.in.Buffered() == 0 {
 				return done(PickQuit, PickItem{})
 			}
@@ -192,20 +272,13 @@ func (u *UI) pickInteractive(title string, ordered []PickItem, opts PickOptions)
 			case 'B': // down
 				cursor++
 			case 'C': // right => open
-				if len(filtered) > 0 {
-					return done(PickSelected, filtered[cursor])
+				if r, e, ok := open(); ok {
+					return r, e
 				}
 			case 'D': // left => up a level
 				if opts.AllowUp {
 					return done(PickGoUp, PickItem{})
 				}
-			}
-		default:
-			// Quitting is Esc / Ctrl-C only, so every printable key (including 'q')
-			// is filter input — you can filter for "queue" without exiting.
-			if r, ok := u.readFilterRune(b); ok {
-				filter += string(r)
-				cursor = 0
 			}
 		}
 	}
@@ -214,9 +287,10 @@ func (u *UI) pickInteractive(title string, ordered []PickItem, opts PickOptions)
 // Control bytes read from the raw terminal.
 const (
 	ctrlC        = 0x03
-	ctrlD        = 0x04
-	ctrlN        = 0x0e
-	ctrlP        = 0x10
+	ctrlD        = 0x04 // half-page down (nav mode)
+	ctrlN        = 0x0e // down
+	ctrlP        = 0x10 // up
+	ctrlU        = 0x15 // half-page up (nav mode)
 	keyBackspace = 0x08
 	keyLF        = 0x0a
 	keyCR        = 0x0d
@@ -302,12 +376,12 @@ func (u *UI) readFilterRune(first byte) (rune, bool) {
 // the number of lines printed above the final (cursor) line, which the next
 // frame uses to move back up and redraw in place. prevAbove is that count from
 // the previous frame (-1 on the first draw).
-func (u *UI) drawPicker(title string, filtered []PickItem, cursor int, filter string, allowUp bool, prevAbove int) int {
+func (u *UI) drawPicker(title string, filtered []PickItem, cursor int, filter string, filtering, allowUp bool, prevAbove int) int {
 	width, height := u.pickerSize()
 
-	// Reserve rows for the title, the hint line, the filter line, and possible
-	// scroll indicators; the rest show items.
-	reserved := 3 // hint + filter + one scroll indicator margin
+	// Reserve rows for the title, the hint line, the status/prompt line, and
+	// possible scroll indicators; the rest show items.
+	reserved := 3 // hint + status/prompt + one scroll indicator margin
 	if title != "" {
 		reserved++
 	}
@@ -339,8 +413,19 @@ func (u *UI) drawPicker(title string, filtered []PickItem, cursor int, filter st
 	if end < len(filtered) {
 		rows = append(rows, u.styleDim(truncateCell(fmt.Sprintf("  ↓ %d more", len(filtered)-end), width)))
 	}
-	rows = append(rows, u.styleDim(truncateCell("  "+pickerHint(allowUp), width)))
-	rows = append(rows, u.pickerPrompt(filter, width))
+	rows = append(rows, u.styleDim(truncateCell("  "+pickerHint(filtering, allowUp), width)))
+	if filtering {
+		// The prompt is the last line so the terminal cursor lands after the typed
+		// text; the cursor is shown (below) for a natural typing experience.
+		rows = append(rows, u.pickerPrompt(filter, width))
+	} else if filter != "" {
+		// Nav mode with an applied filter: show it as a status line, no prompt.
+		rows = append(rows, u.styleDim(truncateCell(fmt.Sprintf("  filter: %s  (⌫ clears)", filter), width)))
+	} else {
+		// Nav mode, no filter: keep the frame height stable with a blank line so
+		// entering/leaving filter mode doesn't jump the layout.
+		rows = append(rows, "")
+	}
 
 	var b strings.Builder
 	if prevAbove >= 0 {
@@ -348,6 +433,13 @@ func (u *UI) drawPicker(title string, filtered []PickItem, cursor int, filter st
 	}
 	b.WriteString("\r\x1b[J") // column 0, clear everything below
 	b.WriteString(strings.Join(rows, "\r\n"))
+	// Show the cursor only while typing a filter; hide it during navigation so the
+	// highlighted row is the sole focus indicator.
+	if filtering {
+		b.WriteString("\x1b[?25h")
+	} else {
+		b.WriteString("\x1b[?25l")
+	}
 	fmt.Fprint(u.err, b.String())
 
 	return len(rows) - 1
@@ -424,14 +516,18 @@ func (u *UI) pickerPrompt(filter string, width int) string {
 	return u.styleDim(prompt) + filter
 }
 
-// pickerHint returns the one-line key legend, adjusted for whether going up a
-// level is available.
-func pickerHint(allowUp bool) string {
-	hint := "↑↓ move · type to filter · ⏎ open"
-	if allowUp {
-		hint += " · ← up"
+// pickerHint returns the one-line key legend for the current mode. Filter mode
+// explains how to apply/cancel the filter; nav mode lists the vim movement keys
+// (and the up-a-level key only when that's available).
+func pickerHint(filtering, allowUp bool) string {
+	if filtering {
+		return "type to filter · ⏎ apply · esc cancel"
 	}
-	return hint + " · esc quit"
+	hint := "j/k move · / filter · ⏎ open"
+	if allowUp {
+		hint += " · h up"
+	}
+	return hint + " · q quit"
 }
 
 // scrollWindow returns the [start,end) slice of an n-item list to show so that

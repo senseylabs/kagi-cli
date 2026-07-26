@@ -238,16 +238,26 @@ func TestClipToWidth(t *testing.T) {
 }
 
 func TestPickerHint(t *testing.T) {
-	up := pickerHint(true)
-	if !strings.Contains(up, "← up") {
-		t.Errorf("hint with AllowUp missing up legend: %q", up)
+	// Nav mode with go-up available: lists the vim keys and the h-up legend.
+	up := pickerHint(false, true)
+	if !strings.Contains(up, "j/k move") || !strings.Contains(up, "/ filter") {
+		t.Errorf("nav hint missing vim/filter legend: %q", up)
 	}
-	noUp := pickerHint(false)
+	if !strings.Contains(up, "h up") {
+		t.Errorf("nav hint with AllowUp missing up legend: %q", up)
+	}
+	// Nav mode without go-up: no up legend.
+	noUp := pickerHint(false, false)
 	if strings.Contains(noUp, "up") {
-		t.Errorf("hint without AllowUp should not mention up: %q", noUp)
+		t.Errorf("nav hint without AllowUp should not mention up: %q", noUp)
 	}
-	if !strings.Contains(noUp, "esc quit") {
-		t.Errorf("hint missing quit legend: %q", noUp)
+	if !strings.Contains(noUp, "q quit") {
+		t.Errorf("nav hint missing quit legend: %q", noUp)
+	}
+	// Filter mode: explains apply/cancel regardless of AllowUp.
+	filt := pickerHint(true, true)
+	if !strings.Contains(filt, "apply") || !strings.Contains(filt, "cancel") {
+		t.Errorf("filter hint missing apply/cancel legend: %q", filt)
 	}
 }
 
