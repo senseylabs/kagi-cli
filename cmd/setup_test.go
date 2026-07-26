@@ -1,11 +1,81 @@
 package cmd
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/senseylabs/kagi-cli/internal/client"
+	"github.com/senseylabs/kagi-cli/internal/ui"
 )
+
+// nonTTYUI builds a UI over buffers (so it is non-interactive: Interactive()
+// reports false and Pick uses the line-based fallback) with the given piped
+// stdin. It returns the UI and the stderr buffer for assertions.
+func nonTTYUI(stdin string) (*ui.UI, *bytes.Buffer) {
+	errBuf := &bytes.Buffer{}
+	u := ui.New(ui.Options{
+		Out:   &bytes.Buffer{},
+		Err:   errBuf,
+		In:    strings.NewReader(stdin),
+		Color: ui.ColorNever,
+	})
+	return u, errBuf
+}
+
+// TestSelectEnvironment_AutoSelectsSingle: one environment needs no prompt.
+func TestSelectEnvironment_AutoSelectsSingle(t *testing.T) {
+	u, _ := nonTTYUI("")
+	envs := []client.Environment{{ID: "e1", Name: "Production", Slug: "prod"}}
+	got, err := selectEnvironment(u, envs)
+	if err != nil {
+		t.Fatalf("selectEnvironment: %v", err)
+	}
+	if got != "prod" {
+		t.Errorf("auto-select returned %q, want prod", got)
+	}
+}
+
+// TestSelectEnvironment_PipedSelection: a piped line number selects that env via
+// the non-interactive fallback picker.
+func TestSelectEnvironment_PipedSelection(t *testing.T) {
+	u, _ := nonTTYUI("2\n")
+	envs := []client.Environment{
+		{ID: "e1", Name: "Production", Slug: "prod"},
+		{ID: "e2", Name: "Staging", Slug: "staging"},
+	}
+	got, err := selectEnvironment(u, envs)
+	if err != nil {
+		t.Fatalf("selectEnvironment: %v", err)
+	}
+	if got != "staging" {
+		t.Errorf("piped selection returned %q, want staging", got)
+	}
+}
+
+// TestSelectEnvironment_NonInteractiveEOFErrors covers the regression fix: with
+// no selection available (exhausted/empty non-TTY stdin), setup must fail loudly
+// instead of treating the EOF as a clean abort and exiting 0.
+func TestSelectEnvironment_NonInteractiveEOFErrors(t *testing.T) {
+	u, _ := nonTTYUI("") // immediate EOF
+	envs := []client.Environment{
+		{ID: "e1", Name: "Production", Slug: "prod"},
+		{ID: "e2", Name: "Staging", Slug: "staging"},
+	}
+	_, err := selectEnvironment(u, envs)
+	if err == nil {
+		t.Fatal("expected an error on non-interactive EOF, got nil")
+	}
+	if errors.Is(err, errSetupAborted) {
+		t.Errorf("non-interactive EOF must be a hard error, not a clean abort: %v", err)
+	}
+	if !strings.Contains(err.Error(), "--env") {
+		t.Errorf("error should point at --env for non-interactive setup: %v", err)
+	}
+}
 
 // TestWriteSetupConfig_OrgFromHomeNotStaleCWD covers FIX #8: `kagi setup` must
 // pin the organization from the account-level (home) selection, not from the

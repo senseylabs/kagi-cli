@@ -1,11 +1,9 @@
 package cmd
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -22,10 +20,15 @@ var (
 )
 
 // errSetupAborted signals a clean, user-requested abort of interactive setup —
-// 'q' at the folder browser or declining the overwrite prompt. runSetup treats
-// it as a clean exit (nil), so the two interactive aborts behave identically
-// instead of one returning nil and the other an error.
+// quitting the folder browser / environment picker or declining the overwrite
+// prompt. runSetup treats it as a clean exit (nil), so every interactive abort
+// behaves identically instead of some returning nil and others an error.
 var errSetupAborted = errors.New("setup aborted")
+
+// errBrowseSelected is an internal sentinel: browseForApp's onLeaf returns it to
+// stop the shared browse loop the moment an app is chosen (the loop otherwise
+// keeps browsing after a leaf). It never escapes browseForApp.
+var errBrowseSelected = errors.New("app selected")
 
 var setupCmd = &cobra.Command{
 	Use:   "setup",
@@ -66,8 +69,10 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		folderPath, err = browseForApp(u, vc)
 		if err != nil {
 			// A user-requested abort ('q') is a clean exit, matching a declined
-			// overwrite prompt — not an error.
+			// overwrite prompt — not an error. Echo it so a quit isn't silent (the
+			// picker erases its own screen region on the way out).
 			if errors.Is(err, errSetupAborted) {
+				u.Info("Aborted")
 				return nil
 			}
 			return err
@@ -94,6 +99,12 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	if envSlug == "" {
 		envSlug, err = selectEnvironment(u, envs)
 		if err != nil {
+			// Quitting the environment picker is a clean exit, like a 'q' in the
+			// folder browser or a declined overwrite.
+			if errors.Is(err, errSetupAborted) {
+				u.Info("Aborted")
+				return nil
+			}
 			return err
 		}
 	} else {
@@ -131,110 +142,87 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// browseForApp walks the SECRETS folder tree interactively and returns the
-// chosen app's full folder path. At each level the user descends into a child
-// folder or picks an app; picking an app ends the walk. Folder paths are only
-// used to resolve the app ID once — the returned path is informational.
+// browseForApp walks the SECRETS folder tree interactively (via the shared
+// vim-style picker) and returns the chosen app's full folder path. At each level
+// the user descends into a child folder or picks an app; picking an app ends the
+// walk. Folder paths are only used to resolve the app ID once — the returned
+// path is informational.
 func browseForApp(u *ui.UI, vc *client.KagiClient) (string, error) {
-	reader := bufio.NewReader(os.Stdin)
-	path := "/"
+	var selected string
 
-	for {
+	listChildren := func(path string) (folders, leaves []BrowseNode, err error) {
 		children, err := vc.ListFolderChildren(path)
 		if err != nil {
-			return "", fmt.Errorf("failed to browse %q: %w", path, err)
+			return nil, nil, fmt.Errorf("failed to browse %q: %w", path, err)
 		}
-
-		if len(children.Folders) == 0 && len(children.Apps) == 0 {
-			return "", fmt.Errorf("no folders or apps under %q. Create an app in the Kagi web app first", path)
+		// An empty library root is a real error worth explaining; an empty
+		// subfolder just lets the user navigate back up (the picker renders it as
+		// "(no matches)" with the go-up key available).
+		if len(children.Folders) == 0 && len(children.Apps) == 0 && isBrowseRoot(path) {
+			return nil, nil, fmt.Errorf("no folders or apps under %q. Create an app in the Kagi web app first", path)
 		}
-
-		// One combined numbered list: folders first (to descend into), then apps.
-		type entry struct {
-			isApp bool
-			name  string
-			slug  string
-		}
-		entries := make([]entry, 0, len(children.Folders)+len(children.Apps))
 		for _, f := range children.Folders {
-			entries = append(entries, entry{isApp: false, name: f.Name, slug: f.Slug})
+			folders = append(folders, BrowseNode{Name: f.Name, Path: joinFolderPath(path, f.Slug)})
 		}
 		for _, a := range children.Apps {
-			entries = append(entries, entry{isApp: true, name: a.Name, slug: a.Slug})
+			// Secondary is the app's stable ID (matching secrets browse): it
+			// disambiguates same-named apps and, being unique, keeps filtering by
+			// name meaningful — unlike a constant "app" tag, which every app shared
+			// so any letter of it matched every row.
+			leaves = append(leaves, BrowseNode{Name: a.Name, Path: joinFolderPath(path, a.Slug), Secondary: a.ID})
 		}
+		return folders, leaves, nil
+	}
 
-		// The interactive menu is human-facing, so it goes to stderr, keeping
-		// stdout free of anything a script would consume.
-		fmt.Fprintf(u.Err(), "\n%s\n", path)
-		for i, e := range entries {
-			kind := "folder/"
-			if e.isApp {
-				kind = "app"
-			}
-			fmt.Fprintf(u.Err(), "  %d. %s  (%s)\n", i+1, e.name, kind)
-		}
+	// Choosing an app (a leaf) captures its path and stops the browse loop via a
+	// sentinel; folders are descended into automatically by runInteractiveBrowse.
+	onLeaf := func(path string, _ BrowseNode) error {
+		selected = path
+		return errBrowseSelected
+	}
 
-		// Re-prompt on an invalid selection rather than aborting the whole setup.
-		for {
-			fmt.Fprint(u.Err(), "\nSelect a number (or 'q' to abort): ")
-
-			input, err := reader.ReadString('\n')
-			if err != nil {
-				return "", fmt.Errorf("failed to read input: %w", err)
-			}
-			input = strings.TrimSpace(input)
-			if strings.EqualFold(input, "q") {
-				fmt.Fprintln(u.Err(), "Aborted.")
-				return "", errSetupAborted
-			}
-
-			choice, err := strconv.Atoi(input)
-			if err != nil || choice < 1 || choice > len(entries) {
-				u.Warn("invalid selection: %s", input)
-				continue
-			}
-
-			chosen := entries[choice-1]
-			path = joinFolderPath(path, chosen.slug)
-			if chosen.isApp {
-				return path, nil
-			}
-			break // descended into a folder; re-list at the new path
-		}
+	switch err := runInteractiveBrowse(u, "/", listChildren, onLeaf); {
+	case errors.Is(err, errBrowseSelected):
+		return selected, nil
+	case err != nil:
+		return "", err
+	case !u.Interactive():
+		// Non-interactive (piped/redirected) with no selection means the input ran
+		// out, not a deliberate quit — fail loudly rather than exit 0 doing nothing.
+		return "", fmt.Errorf("no app selected; pass --path (and --env) for non-interactive setup")
+	default:
+		return "", errSetupAborted // interactive user quit without choosing an app
 	}
 }
 
-// selectEnvironment prompts the user to choose an environment, auto-selecting
-// when the app has exactly one.
+// selectEnvironment prompts the user to choose an environment via the picker,
+// auto-selecting when the app has exactly one. A quit returns errSetupAborted.
 func selectEnvironment(u *ui.UI, envs []client.Environment) (string, error) {
 	if len(envs) == 1 {
 		u.Info("auto-selected environment: %s (%s)", envs[0].Name, envs[0].Slug)
 		return envs[0].Slug, nil
 	}
 
-	fmt.Fprintln(u.Err(), "\nSelect an environment:")
-	for i, e := range envs {
-		fmt.Fprintf(u.Err(), "  %d. %s (%s)\n", i+1, e.Name, e.Slug)
+	items := make([]ui.PickItem, 0, len(envs))
+	for _, e := range envs {
+		label := e.Name
+		if label == "" {
+			label = e.Slug
+		}
+		items = append(items, ui.PickItem{Label: label, Secondary: e.Slug, Value: e.Slug})
 	}
 
-	reader := bufio.NewReader(os.Stdin)
-	// Re-prompt on an invalid selection rather than aborting.
-	for {
-		fmt.Fprint(u.Err(), "\nEnter number: ")
-
-		input, err := reader.ReadString('\n')
-		if err != nil {
-			return "", fmt.Errorf("failed to read input: %w", err)
-		}
-		input = strings.TrimSpace(input)
-
-		choice, err := strconv.Atoi(input)
-		if err != nil || choice < 1 || choice > len(envs) {
-			u.Warn("invalid selection: %s", input)
-			continue
-		}
-		return envs[choice-1].Slug, nil
+	res, err := u.Pick("Select an environment", items, ui.PickOptions{})
+	if err != nil {
+		return "", err
 	}
+	if res.Kind != ui.PickSelected {
+		if !u.Interactive() {
+			return "", fmt.Errorf("no environment selected; pass --env for non-interactive setup")
+		}
+		return "", errSetupAborted
+	}
+	return res.Item.Value.(string), nil
 }
 
 // joinFolderPath appends a slug to a folder path, yielding an absolute,

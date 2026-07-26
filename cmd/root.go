@@ -46,9 +46,9 @@ func SetVersion(v string) {
 var rootCmd = &cobra.Command{
 	Use:   "kagi",
 	Short: "Kagi CLI — secrets management for Sensey",
-	Long:  "A CLI tool for managing secrets in Kagi. Authenticate once with 'kagi login' (Keycloak Device Authorization Grant); scripts and agents act through that same logged-in session.",
-	Example: "  kagi login\n" +
-		"  kagi setup --path /village/kaizen --env prod\n" +
+	Long: "Kagi CLI manages secrets, certificates, passwords, and Kubernetes workload\n" +
+		"identity for your Sensey organization.",
+	Example: "  kagi setup --path /village/kaizen --env prod\n" +
 		"  kagi secrets list\n" +
 		"  kagi secrets get DATABASE_URL",
 	// SilenceUsage stops Cobra from dumping the full usage/help screen after an

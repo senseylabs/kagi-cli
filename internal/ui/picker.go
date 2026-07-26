@@ -83,6 +83,13 @@ func (u *UI) canInteract() bool {
 		term.IsTerminal(int(u.inFile.Fd())) && term.IsTerminal(int(u.errFile.Fd()))
 }
 
+// Interactive reports whether Pick will run its interactive terminal UI (both
+// stdin and stderr are TTYs). When false, Pick uses the line-based fallback, and
+// a PickQuit there typically means end-of-input rather than a deliberate quit —
+// callers that require a selection (e.g. setup) use this to fail loudly instead
+// of treating an exhausted pipe as a clean abort.
+func (u *UI) Interactive() bool { return u.canInteract() }
+
 // pickerSize returns the messaging terminal's width and height, falling back to
 // a sane 80x24 when the size can't be read.
 func (u *UI) pickerSize() (w, h int) {
