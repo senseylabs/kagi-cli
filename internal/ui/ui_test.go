@@ -130,11 +130,69 @@ func TestTableHeaderColorOnlyOnHeader(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("expected 2 lines, got %d", len(rows))
 	}
-	if !strings.Contains(rows[0], colorBold) {
+	if !strings.Contains(rows[0], colorBoldCyan) {
 		t.Errorf("header should be colored: %q", rows[0])
 	}
 	if strings.Contains(rows[1], "\x1b[") {
 		t.Errorf("data row must never be colored: %q", rows[1])
+	}
+}
+
+func TestErrorRendersRedBlock(t *testing.T) {
+	errBuf := &bytes.Buffer{}
+	u := New(Options{Out: &bytes.Buffer{}, Err: errBuf, Color: ColorAlways, Width: 80})
+
+	u.Error(WithHint(errors.New("session expired"), "kagi login"))
+
+	got := errBuf.String()
+	rows := lines(got)
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 lines (message + hint), got %d:\n%q", len(rows), got)
+	}
+	if !strings.HasPrefix(stripSGR(rows[0]), "Error: session expired") {
+		t.Errorf("first line should be the Error block: %q", rows[0])
+	}
+	if !strings.Contains(stripSGR(rows[1]), "Run 'kagi login'") {
+		t.Errorf("hint line missing: %q", rows[1])
+	}
+	// Each line must be independently colored red (reset never spans a newline).
+	for i, ln := range rows {
+		if !strings.HasPrefix(ln, colorRed) || !strings.HasSuffix(ln, colorReset) {
+			t.Errorf("line %d not wrapped in red: %q", i, ln)
+		}
+	}
+}
+
+func TestErrorNoColorWhenDisabled(t *testing.T) {
+	errBuf := &bytes.Buffer{}
+	u := New(Options{Out: &bytes.Buffer{}, Err: errBuf, Color: ColorNever, Width: 80})
+	u.Error(errors.New("boom"))
+	if got := errBuf.String(); got != "Error: boom\n" {
+		t.Errorf("plain error mismatch: %q", got)
+	}
+}
+
+func TestErrorNilIsNoop(t *testing.T) {
+	errBuf := &bytes.Buffer{}
+	u := New(Options{Out: &bytes.Buffer{}, Err: errBuf, Color: ColorAlways, Width: 80})
+	u.Error(nil)
+	if errBuf.Len() != 0 {
+		t.Errorf("nil error should print nothing, got %q", errBuf.String())
+	}
+}
+
+// stripSGR removes ANSI SGR sequences so assertions can match on visible text.
+func stripSGR(s string) string {
+	for {
+		i := strings.Index(s, "\x1b[")
+		if i < 0 {
+			return s
+		}
+		j := strings.IndexByte(s[i:], 'm')
+		if j < 0 {
+			return s
+		}
+		s = s[:i] + s[i+j+1:]
 	}
 }
 

@@ -19,16 +19,24 @@ import (
 	"github.com/senseylabs/kagi-cli/internal/ui"
 )
 
+var loginForce bool
+
 var loginCmd = &cobra.Command{
 	Use:   "login",
 	Short: "Authenticate with Keycloak via Device Authorization Grant",
-	Long:  "Starts a Keycloak Device Authorization Grant flow. Opens your browser to complete authentication.",
-	Args:  cobra.NoArgs,
-	RunE:  runLogin,
+	Long: "Starts a Keycloak Device Authorization Grant flow. Opens your browser to complete authentication.\n\n" +
+		"When a valid session already exists, login reports it and exits without re-authenticating; " +
+		"pass --force to log in again (for example, as a different user).",
+	Example: "  kagi login\n" +
+		"  kagi login --force",
+	Args: cobra.NoArgs,
+	RunE: runLogin,
 }
 
 func init() {
 	rootCmd.AddCommand(loginCmd)
+	loginCmd.Flags().BoolVar(&loginForce, "force", false,
+		"Re-authenticate even if a valid session already exists")
 }
 
 func runLogin(cmd *cobra.Command, args []string) error {
@@ -38,6 +46,40 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	// error) rather than being silently ignored.
 	if cfgDiscoveryTimeoutErr != nil {
 		return cfgDiscoveryTimeoutErr
+	}
+
+	// Short-circuit when a usable session already exists: re-running `kagi login`
+	// must recognize the logged-in session instead of walking the whole device
+	// flow (printing a URL, a code, and "Waiting for authentication...") again.
+	// NewKagiClient is the same gate every command uses — it loads the stored
+	// session and refreshes it when the access token has expired, returning an
+	// error only when there is no usable session. --force skips this to allow a
+	// deliberate re-login (e.g. switching users).
+	//
+	// Guard on the environment: NewKagiClient loads whatever session is stored
+	// without checking it targets the requested API/issuer, so without this a
+	// `kagi login --dev` (or a KAGI_API_URL override) would report the existing
+	// prod session as "already logged in" and block the re-login the user is
+	// actually asking for. Empty URL fields (very old credential blobs) match
+	// anything, so an upgrade never wedges login.
+	if !loginForce {
+		store := auth.NewTokenStore()
+		if creds, err := store.Load(); err == nil &&
+			(creds.IssuerURL == "" || creds.IssuerURL == cfgIssuer) &&
+			(creds.APIURL == "" || creds.APIURL == cfgAPIURL) {
+			if _, err := client.NewKagiClient(cfgAPIURL, cfgIssuer); err == nil {
+				u.Success("Already logged in")
+				u.Info("API: %s", cfgAPIURL)
+				if slug, id := config.HomeOrganization(); id != "" {
+					u.Info("Active organization: %s", slug)
+				}
+				if os.Getenv("KAGI_TOKEN") != "" {
+					u.Warn("KAGI_TOKEN is set; other commands reject it — unset it to use this session")
+				}
+				u.Info("Run 'kagi login --force' to log in again")
+				return nil
+			}
+		}
 	}
 
 	if cfgDevMode {

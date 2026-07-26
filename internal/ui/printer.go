@@ -169,10 +169,11 @@ func (u *UI) Render(table *Table) error {
 	}
 
 	// Colorize the header line (the first line) as a whole so ANSI codes never
-	// land inside a tabwriter cell and skew its width accounting.
+	// land inside a tabwriter cell and skew its width accounting. Bold cyan gives
+	// the header presence without theming the data rows below it.
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
 	if u.color && len(lines) > 0 {
-		lines[0] = u.paint(colorBold, lines[0])
+		lines[0] = u.paint(colorBoldCyan, lines[0])
 	}
 	for _, ln := range lines {
 		fmt.Fprintln(u.out, ln)

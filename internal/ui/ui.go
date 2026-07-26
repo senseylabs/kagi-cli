@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"golang.org/x/term"
 )
@@ -57,12 +58,19 @@ type Options struct {
 
 // UI carries the streams and presentation settings for one command run.
 type UI struct {
-	out   io.Writer
-	err   io.Writer
-	in    *bufio.Reader
-	color bool
-	isTTY bool
-	width int
+	out io.Writer
+	err io.Writer
+	in  *bufio.Reader
+	// inFile/errFile are the underlying *os.File for the input and messaging
+	// streams when they are real files (nil for buffers/pipes used in tests).
+	// The interactive picker needs them to detect a terminal and switch stdin to
+	// raw mode; when either is nil or not a TTY, the picker uses its line-based
+	// fallback instead.
+	inFile  *os.File
+	errFile *os.File
+	color   bool
+	isTTY   bool
+	width   int
 }
 
 // New builds a UI from opts, auto-detecting width, TTY-ness, and color where
@@ -98,13 +106,18 @@ func New(opts Options) *UI {
 		}
 	}
 
+	inFile, _ := inR.(*os.File)
+	errFile, _ := errW.(*os.File)
+
 	return &UI{
-		out:   out,
-		err:   errW,
-		in:    bufio.NewReader(inR),
-		color: resolveColor(opts.Color, isTTY),
-		isTTY: isTTY,
-		width: width,
+		out:     out,
+		err:     errW,
+		in:      bufio.NewReader(inR),
+		inFile:  inFile,
+		errFile: errFile,
+		color:   resolveColor(opts.Color, isTTY),
+		isTTY:   isTTY,
+		width:   width,
 	}
 }
 
@@ -156,6 +169,21 @@ func (u *UI) Success(format string, args ...any) {
 // yellow when color is enabled.
 func (u *UI) Warn(format string, args ...any) {
 	u.message("! ", colorYellow, format, args...)
+}
+
+// Error prints an error to stderr as a red "Error: <message>" block. A
+// multi-line message (e.g. one carrying a "Run 'kagi ...'" hint) is colored line
+// by line so the reset never spans a newline. Casing and punctuation are left
+// as-is: error strings are already normalized by the ui error helpers.
+func (u *UI) Error(err error) {
+	if err == nil {
+		return
+	}
+	lines := strings.Split(err.Error(), "\n")
+	lines[0] = "Error: " + lines[0]
+	for _, ln := range lines {
+		fmt.Fprintln(u.err, u.paint(colorRed, ln))
+	}
 }
 
 // message renders one stderr line following the house convention: sentence-cased

@@ -53,14 +53,18 @@ var rootCmd = &cobra.Command{
 		"  kagi secrets get DATABASE_URL",
 	// SilenceUsage stops Cobra from dumping the full usage/help screen after an
 	// error — a failed API call is not a usage mistake, and the screen buries the
-	// one line that matters. Errors (including arg/flag errors, which stay concise
-	// and self-describing, e.g. "accepts 1 arg(s), received 0") print as a single
-	// "Error: ..." line; run `kagi <command> --help` for usage.
-	SilenceUsage: true,
+	// one line that matters. SilenceErrors hands error printing to Execute so we
+	// render it as a single red "Error: ..." block (honoring --no-color / non-TTY)
+	// instead of Cobra's plain print. Arg/flag errors stay concise and
+	// self-describing (e.g. "accepts 1 arg(s), received 0"); run
+	// `kagi <command> --help` for usage.
+	SilenceUsage:  true,
+	SilenceErrors: true,
 }
 
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
+		newUI().Error(err)
 		os.Exit(1)
 	}
 }

@@ -164,6 +164,166 @@ func TestPickReadErrorSurfaced(t *testing.T) {
 	}
 }
 
+// --- Interactive-picker pure helpers ----------------------------------------
+
+func TestScrollWindow(t *testing.T) {
+	cases := []struct {
+		name               string
+		cursor, n, size    int
+		wantStart, wantEnd int
+	}{
+		{"fits entirely", 0, 3, 10, 0, 3},
+		{"cursor at top scrolled", 0, 20, 6, 0, 6},
+		{"cursor centered", 10, 20, 6, 7, 13},
+		{"cursor at bottom clamps end", 19, 20, 6, 14, 20},
+		{"exact fit", 4, 6, 6, 0, 6},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			start, end := scrollWindow(c.cursor, c.n, c.size)
+			if start != c.wantStart || end != c.wantEnd {
+				t.Errorf("scrollWindow(%d,%d,%d) = (%d,%d), want (%d,%d)",
+					c.cursor, c.n, c.size, start, end, c.wantStart, c.wantEnd)
+			}
+			// The window must always contain the cursor and never exceed size.
+			if end-start > c.size {
+				t.Errorf("window %d wider than size %d", end-start, c.size)
+			}
+			if c.n > 0 && (c.cursor < start || c.cursor >= end) {
+				t.Errorf("cursor %d not in window [%d,%d)", c.cursor, start, end)
+			}
+		})
+	}
+}
+
+func TestClamp(t *testing.T) {
+	if got := clamp(5, 0, 3); got != 3 {
+		t.Errorf("clamp(5,0,3) = %d, want 3", got)
+	}
+	if got := clamp(-1, 0, 3); got != 0 {
+		t.Errorf("clamp(-1,0,3) = %d, want 0", got)
+	}
+	if got := clamp(2, 0, 3); got != 2 {
+		t.Errorf("clamp(2,0,3) = %d, want 2", got)
+	}
+	// Empty list (hi < lo) pins to lo, so an empty filtered list never indexes.
+	if got := clamp(0, 0, -1); got != 0 {
+		t.Errorf("clamp on empty list = %d, want 0", got)
+	}
+}
+
+func TestTrimLastRune(t *testing.T) {
+	if got := trimLastRune("abc"); got != "ab" {
+		t.Errorf("trimLastRune(abc) = %q, want ab", got)
+	}
+	if got := trimLastRune(""); got != "" {
+		t.Errorf("trimLastRune(empty) = %q, want empty", got)
+	}
+	// Multibyte: must drop one rune, not one byte.
+	if got := trimLastRune("café"); got != "caf" {
+		t.Errorf("trimLastRune(café) = %q, want caf", got)
+	}
+}
+
+func TestClipToWidth(t *testing.T) {
+	if got := clipToWidth("hello", 3); got != "hel" {
+		t.Errorf("clipToWidth(hello,3) = %q, want hel", got)
+	}
+	if got := clipToWidth("hi", 5); got != "hi" {
+		t.Errorf("clipToWidth(hi,5) = %q, want hi", got)
+	}
+	if got := clipToWidth("hi", 0); got != "" {
+		t.Errorf("clipToWidth(hi,0) = %q, want empty", got)
+	}
+}
+
+func TestPickerHint(t *testing.T) {
+	up := pickerHint(true)
+	if !strings.Contains(up, "← up") {
+		t.Errorf("hint with AllowUp missing up legend: %q", up)
+	}
+	noUp := pickerHint(false)
+	if strings.Contains(noUp, "up") {
+		t.Errorf("hint without AllowUp should not mention up: %q", noUp)
+	}
+	if !strings.Contains(noUp, "esc quit") {
+		t.Errorf("hint missing quit legend: %q", noUp)
+	}
+}
+
+func TestReadEscapeFinal(t *testing.T) {
+	// The leading Esc is assumed already consumed; the string is what follows.
+	cases := map[string]byte{
+		"[A":    'A', // up
+		"[B":    'B', // down
+		"[C":    'C', // right
+		"[D":    'D', // left
+		"[3~":   '~', // Delete: parameter then final '~' (not leaked as filter)
+		"[1;5A": 'A', // Ctrl-Up: parameters then final 'A'
+		"[6~":   '~', // PgDn
+		"OA":    'A', // SS3 up
+	}
+	for seq, want := range cases {
+		u, _, _ := newTestUI(t, 80, seq)
+		if got := u.readEscapeFinal(); got != want {
+			t.Errorf("readEscapeFinal(Esc %q) = %q, want %q", seq, got, want)
+		}
+	}
+}
+
+func TestReadFilterRune(t *testing.T) {
+	// ASCII printable passes through.
+	u, _, _ := newTestUI(t, 80, "")
+	if r, ok := u.readFilterRune('a'); !ok || r != 'a' {
+		t.Errorf("ascii: got (%q,%v), want ('a',true)", r, ok)
+	}
+	// A control byte is dropped.
+	if _, ok := u.readFilterRune(0x01); ok {
+		t.Errorf("control byte should be dropped")
+	}
+	// UTF-8 'é' = 0xC3 0xA9: lead byte passed in, continuation read from stdin.
+	u2, _, _ := newTestUI(t, 80, "\xa9")
+	if r, ok := u2.readFilterRune(0xC3); !ok || r != 'é' {
+		t.Errorf("utf8 é: got (%q,%v), want ('é',true)", r, ok)
+	}
+	// UTF-8 'ş' = 0xC5 0x9F (a Turkish folder-name character).
+	u3, _, _ := newTestUI(t, 80, "\x9f")
+	if r, ok := u3.readFilterRune(0xC5); !ok || r != 'ş' {
+		t.Errorf("utf8 ş: got (%q,%v), want ('ş',true)", r, ok)
+	}
+}
+
+func TestPickerRowClipsToWidth(t *testing.T) {
+	// Color off (ColorNever) so runeLen reflects visible width with no SGR codes.
+	u, _, _ := newTestUI(t, 20, "")
+	long := PickItem{Label: strings.Repeat("x", 100), IsFolder: true}
+
+	if row := u.pickerRow(long, false, 20); runeLen(row) > 20 {
+		t.Errorf("unselected row exceeds width 20 (got %d): %q", runeLen(row), row)
+	}
+	// A selected row is padded to exactly the width (the highlight bar).
+	if row := u.pickerRow(long, true, 20); runeLen(row) != 20 {
+		t.Errorf("selected row width = %d, want exactly 20: %q", runeLen(row), row)
+	}
+	// A row with a long Secondary must also stay within width.
+	leaf := PickItem{Label: "db", Secondary: strings.Repeat("/seg", 40)}
+	if row := u.pickerRow(leaf, false, 20); runeLen(row) > 20 {
+		t.Errorf("row with long secondary exceeds width 20 (got %d): %q", runeLen(row), row)
+	}
+}
+
+func TestPickerPromptKeepsTailWithinWidth(t *testing.T) {
+	u, _, _ := newTestUI(t, 15, "")
+	p := u.pickerPrompt(strings.Repeat("y", 50), 15)
+	if runeLen(p) > 15 {
+		t.Errorf("prompt exceeds width 15 (got %d): %q", runeLen(p), p)
+	}
+	// The most recently typed characters (the tail) must remain visible.
+	if !strings.HasSuffix(p, "y") {
+		t.Errorf("prompt should keep the filter tail visible: %q", p)
+	}
+}
+
 func TestPickEllipsizesSecondaryToWidth(t *testing.T) {
 	long := "/very/long/secondary/path/" + strings.Repeat("segment/", 20)
 	items := []PickItem{{Label: "x", Secondary: long}}

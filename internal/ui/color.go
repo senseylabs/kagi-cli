@@ -6,13 +6,24 @@ import (
 	"unicode"
 )
 
-// ANSI SGR codes. Kept minimal on purpose: color is a signal on status lines
-// and headers, not decoration on data.
+// ANSI SGR codes. We deliberately use the basic 16-color set (30–37) and the
+// standard attributes rather than 256-color or truecolor escapes: the basic
+// codes are remapped by the terminal to the user's chosen palette, so output
+// respects whatever light/dark theme is in effect instead of hard-coding RGB
+// values that clash with it. Color is a signal (status, headers, folders,
+// selection), never decoration on the data a script consumes.
 const (
-	colorReset  = "\x1b[0m"
-	colorBold   = "\x1b[1m"
-	colorGreen  = "\x1b[32m"
-	colorYellow = "\x1b[33m"
+	colorReset     = "\x1b[0m"
+	colorBold      = "\x1b[1m"
+	colorDim       = "\x1b[2m"
+	colorReverse   = "\x1b[7m"
+	colorRed       = "\x1b[31m"
+	colorGreen     = "\x1b[32m"
+	colorYellow    = "\x1b[33m"
+	colorBlue      = "\x1b[34m"
+	colorCyan      = "\x1b[36m"
+	colorBoldCyan  = "\x1b[1;36m"
+	colorBoldGreen = "\x1b[1;32m"
 )
 
 // resolveColor turns a ColorMode plus TTY-ness into a concrete decision,
@@ -38,6 +49,19 @@ func (u *UI) paint(code, s string) string {
 	}
 	return code + s + colorReset
 }
+
+// Styling helpers used by the interactive picker and tables. Each is a no-op
+// when color is disabled, so callers never need to branch on u.color.
+
+// styleFolder renders a folder name so it reads as navigable (bold cyan).
+func (u *UI) styleFolder(s string) string { return u.paint(colorBoldCyan, s) }
+
+// styleDim renders secondary/supporting text (paths, hints) faintly.
+func (u *UI) styleDim(s string) string { return u.paint(colorDim, s) }
+
+// styleSelected renders the highlighted picker row as a reverse-video bar,
+// which inverts against the terminal's own fg/bg and so tracks its theme.
+func (u *UI) styleSelected(s string) string { return u.paint(colorReverse, s) }
 
 // normalizeMessage enforces the status-line convention: no trailing period and
 // no trailing whitespace, so callers can't drift into "Done." vs "Done" vs
