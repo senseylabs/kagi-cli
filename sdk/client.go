@@ -13,7 +13,8 @@ import (
 )
 
 // HeaderOrganizationID is the request header carrying the active organization
-// UUID. It is sent whenever the client has an active organization configured.
+// UUID. It is sent only for JWT (human) auth — for PAT auth the org is bound to
+// the token server-side and sending a mismatched header would be rejected (403).
 const HeaderOrganizationID = "X-Organization-ID"
 
 // Client is a read-only HTTP client for the Kagi secrets management API.
@@ -22,13 +23,17 @@ type Client struct {
 	token      string
 	httpClient *http.Client
 
-	// orgID is the active organization UUID, sent as X-Organization-ID on every
-	// request when set.
+	// orgID is the active organization UUID, sent as X-Organization-ID on JWT
+	// requests. Empty for PAT auth (the org is bound to the token).
 	orgID string
-	// orgAware is set by NewOrgClient. When true an empty orgID on an org-scoped
-	// request fails fast (ErrNoOrganizationSelected) rather than being sent
-	// without a header. The bare NewClient leaves this false so it stays
-	// unopinionated for callers that manage org context themselves.
+	// isPAT reports whether token is a Personal Access Token. When true the org
+	// header is never sent — the backend resolves the org from the token itself
+	// and rejects a mismatched header (403).
+	isPAT bool
+	// orgAware is set by NewOrgClient for JWT auth. When true an empty orgID on
+	// an org-scoped request fails fast (ErrNoOrganizationSelected) rather than
+	// being sent without a header. The bare NewClient leaves this false so it
+	// stays unopinionated for callers that manage org context themselves.
 	orgAware bool
 }
 
@@ -52,17 +57,25 @@ func NewClient(baseURL, token string) *Client {
 // NewOrgClient creates an organization-aware Kagi SDK client.
 //
 // orgID is the active organization UUID, sent as the X-Organization-ID header
-// on every request when non-empty. The returned client is org-aware: an
-// org-scoped request with no org selected fails fast with
-// ErrNoOrganizationSelected rather than being sent without a header.
-func NewOrgClient(baseURL, token, orgID string) *Client {
+// on every request when isPAT is false (JWT / human auth). When isPAT is true
+// the token already carries its org server-side, so no header is sent — sending
+// a mismatched one would be rejected with 403 (the confused-deputy guard).
+//
+// A JWT client is org-aware: an org-scoped request with no org selected fails
+// fast with ErrNoOrganizationSelected rather than being sent without a header.
+// A PAT client never needs a selected org, so it is exempt from that check.
+func NewOrgClient(baseURL, token, orgID string, isPAT bool) *Client {
 	c := NewClient(baseURL, token)
 	c.orgID = orgID
-	c.orgAware = true
+	c.isPAT = isPAT
+	// JWT clients are org-aware: an org-scoped request with no org selected
+	// fails fast. PAT clients never need a selected org (token-bound).
+	c.orgAware = !isPAT
 	return c
 }
 
 // ListOrganizations returns the organizations the authenticated user belongs to.
+// Intended for JWT (human) auth; PAT auth is scoped to a single token-bound org.
 func (c *Client) ListOrganizations(ctx context.Context) ([]Organization, error) {
 	var resp APIResponse[[]Organization]
 	if err := c.doGet(ctx, "/kagi/organizations", &resp); err != nil {
@@ -421,8 +434,9 @@ func (c *Client) doGet(ctx context.Context, path string, result any) error {
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/json")
 
-	// The active org is resolved from this header when configured.
-	if c.orgID != "" {
+	// JWT (human) auth resolves the active org from this header. PAT auth must
+	// NOT send it — the org is bound to the token and a mismatch returns 403.
+	if !c.isPAT && c.orgID != "" {
 		req.Header.Set(HeaderOrganizationID, c.orgID)
 	}
 

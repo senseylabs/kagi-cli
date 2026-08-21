@@ -449,16 +449,59 @@ func TestOrgHeader_SentForJWT(t *testing.T) {
 	ts := orgHeaderServer(t, &gotHeader, &present)
 	defer ts.Close()
 
-	client := NewOrgClient(ts.URL, "jwt-token", "org-uuid-123")
+	client := NewOrgClient(ts.URL, "jwt-token", "org-uuid-123", false /* isPAT */)
 	if _, err := client.ListEnvironments(context.Background(), "app-1"); err != nil {
 		t.Fatalf("ListEnvironments returned error: %v", err)
 	}
 
 	if !present {
-		t.Fatalf("expected %s header to be sent, but it was absent", HeaderOrganizationID)
+		t.Fatalf("expected %s header to be sent for JWT auth, but it was absent", HeaderOrganizationID)
 	}
 	if gotHeader != "org-uuid-123" {
 		t.Errorf("unexpected %s header: got %q, want %q", HeaderOrganizationID, gotHeader, "org-uuid-123")
+	}
+}
+
+func TestOrgHeader_NotSentForPAT(t *testing.T) {
+	var gotHeader string
+	var present bool
+	ts := orgHeaderServer(t, &gotHeader, &present)
+	defer ts.Close()
+
+	// Even with an orgID supplied, a PAT client must NOT send the header. The
+	// backend resolves the org from the token and cross-checks any header it is
+	// given: a mismatch is rejected with 403 under the tenancy enforcement mode
+	// the API runs in (strict-reads), so an org selected locally with
+	// `kagi org use` would break every CI call.
+	client := NewOrgClient(ts.URL, "vv_pat_token", "org-uuid-123", true /* isPAT */)
+	if _, err := client.ListEnvironments(context.Background(), "app-1"); err != nil {
+		t.Fatalf("ListEnvironments returned error: %v", err)
+	}
+
+	if present {
+		t.Errorf("expected %s header to be absent for PAT auth, but got %q", HeaderOrganizationID, gotHeader)
+	}
+}
+
+func TestPATClient_NotOrgGated(t *testing.T) {
+	// A PAT client is never org-aware: with no org selected it must still reach
+	// the server rather than fail fast with ErrNoOrganizationSelected. A CI
+	// runner has no `kagi org use` selection to make.
+	reached := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		resp := map[string]interface{}{"data": []Environment{}, "message": "ok", "status": 200}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer ts.Close()
+
+	client := NewOrgClient(ts.URL, "vv_pat_token", "", true /* isPAT */)
+	if _, err := client.ListEnvironments(context.Background(), "app-1"); err != nil {
+		t.Fatalf("ListEnvironments returned error: %v", err)
+	}
+	if !reached {
+		t.Error("PAT client should have reached the server without an org selected")
 	}
 }
 
@@ -472,7 +515,7 @@ func TestOrgScopedRequest_FailsFastWhenNoOrgSelected(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client := NewOrgClient(ts.URL, "jwt-token", "")
+	client := NewOrgClient(ts.URL, "jwt-token", "", false /* isPAT */)
 	_, err := client.ListEnvironments(context.Background(), "app-1")
 	if err == nil {
 		t.Fatal("expected ErrNoOrganizationSelected, got nil")
@@ -492,7 +535,7 @@ func TestListOrganizations_AllowedWithoutOrgSelected(t *testing.T) {
 	ts := newTestServer(t, "/kagi/organizations", orgs)
 	defer ts.Close()
 
-	client := NewOrgClient(ts.URL, "test-token", "")
+	client := NewOrgClient(ts.URL, "test-token", "", false /* isPAT */)
 	result, err := client.ListOrganizations(context.Background())
 	if err != nil {
 		t.Fatalf("ListOrganizations returned error: %v", err)

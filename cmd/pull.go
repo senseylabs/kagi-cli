@@ -47,7 +47,8 @@ func runPull(cmd *cobra.Command, args []string) error {
 	switch format {
 	case "env", "json", "yaml":
 	default:
-		return fmt.Errorf("unsupported format %q (use 'env', 'json', or 'yaml')", outputValue)
+		return enrichFormatError(outputValue,
+			fmt.Errorf("unsupported format %q (use 'env', 'json', or 'yaml')", outputValue), true)
 	}
 
 	vc, err := client.NewKagiClient(cfgAPIURL, cfgIssuer)

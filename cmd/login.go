@@ -67,14 +67,14 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		if creds, err := store.Load(); err == nil &&
 			(creds.IssuerURL == "" || creds.IssuerURL == cfgIssuer) &&
 			(creds.APIURL == "" || creds.APIURL == cfgAPIURL) {
-			if _, err := client.NewKagiClient(cfgAPIURL, cfgIssuer); err == nil {
+			if _, err := client.NewSessionClient(cfgAPIURL, cfgIssuer); err == nil {
 				u.Success("Already logged in")
 				u.Info("API: %s", cfgAPIURL)
 				if slug, id := config.HomeOrganization(); id != "" {
 					u.Info("Active organization: %s", slug)
 				}
-				if os.Getenv("KAGI_TOKEN") != "" {
-					u.Warn("KAGI_TOKEN is set; other commands reject it — unset it to use this session")
+				if auth.StaticToken() != "" {
+					u.Warn("KAGI_TOKEN is set and takes precedence — other commands will use it, not this session. Unset it to use this login")
 				}
 				u.Info("Run 'kagi login --force' to log in again")
 				return nil

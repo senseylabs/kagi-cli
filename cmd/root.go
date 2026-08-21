@@ -184,11 +184,13 @@ func isStaleAPIURL(url string) bool {
 }
 
 func requireAuth() error {
-	// KAGI_TOKEN (Personal Access Token) authentication has been removed: the CLI
-	// authenticates only via the logged-in session from 'kagi login'. Fail loudly
-	// rather than silently ignoring a stale PAT the caller believes is in effect.
-	if os.Getenv("KAGI_TOKEN") != "" {
-		return fmt.Errorf("the CLI no longer authenticates with KAGI_TOKEN (Personal Access Tokens). Run 'kagi login' and unset KAGI_TOKEN")
+	// KAGI_TOKEN (a Personal Access Token) is the non-interactive credential: it
+	// IS the authentication, so there is no stored session to check. It takes
+	// precedence over any logged-in session on the same machine — a CI runner
+	// must never silently fall back to a stale human session. An empty or
+	// whitespace-only value counts as unset (see auth.StaticToken).
+	if auth.StaticToken() != "" {
+		return nil
 	}
 	store := auth.NewTokenStore()
 	if _, err := store.Load(); err != nil {

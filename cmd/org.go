@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"fmt"
 	"strings"
 
 	kagi "github.com/senseylabs/kagi-sdk"
 
 	"github.com/spf13/cobra"
 
+	"github.com/senseylabs/kagi-cli/internal/auth"
 	"github.com/senseylabs/kagi-cli/internal/client"
 	"github.com/senseylabs/kagi-cli/internal/config"
 	"github.com/senseylabs/kagi-cli/internal/ui"
@@ -18,7 +20,10 @@ var orgCmd = &cobra.Command{
 	Long: "List the organizations you belong to and choose which one the CLI acts in.\n" +
 		"  kagi org list           list your organizations\n" +
 		"  kagi org use <slug>     set the active organization\n" +
-		"  kagi org current        show the active organization",
+		"  kagi org current        show the active organization\n\n" +
+		"Organization selection applies to human (JWT) login only. A KAGI_TOKEN\n" +
+		"(Personal Access Token) is already bound to a single organization, so no\n" +
+		"selection is needed or possible when KAGI_TOKEN is set.",
 }
 
 var orgListCmd = &cobra.Command{
@@ -48,7 +53,23 @@ func init() {
 	rootCmd.AddCommand(orgCmd)
 }
 
+// rejectPATForOrgSelection blocks org list/use/current under PAT auth, where the
+// org is bound to the token and cannot be chosen client-side. The backend does
+// serve /kagi/organizations to a PAT — it answers with every org the token
+// OWNER belongs to, not the one org the token can act in — so listing here would
+// invite the caller to `kagi org use` an org the token can never reach, and the
+// stored selection is not even sent (PAT requests omit X-Organization-ID).
+func rejectPATForOrgSelection() error {
+	if auth.StaticToken() != "" {
+		return fmt.Errorf("organization selection does not apply when KAGI_TOKEN is set — a Personal Access Token is already bound to a single organization")
+	}
+	return nil
+}
+
 func runOrgList(cmd *cobra.Command, args []string) error {
+	if err := rejectPATForOrgSelection(); err != nil {
+		return err
+	}
 	u := newUI()
 	format, err := outputFormat()
 	if err != nil {
@@ -90,6 +111,9 @@ func runOrgList(cmd *cobra.Command, args []string) error {
 }
 
 func runOrgUse(cmd *cobra.Command, args []string) error {
+	if err := rejectPATForOrgSelection(); err != nil {
+		return err
+	}
 	u := newUI()
 	if err := requireAuth(); err != nil {
 		return err
@@ -139,6 +163,9 @@ func runOrgUse(cmd *cobra.Command, args []string) error {
 }
 
 func runOrgCurrent(cmd *cobra.Command, args []string) error {
+	if err := rejectPATForOrgSelection(); err != nil {
+		return err
+	}
 	u := newUI()
 	format, err := outputFormat()
 	if err != nil {
