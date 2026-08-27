@@ -56,6 +56,11 @@ func looksLikeFilePath(value string) bool {
 // "/tmp/app.env", and the bare format error does not explain why. hasOutFile
 // tells the caller whether the command actually offers --out-file (only `pull`
 // does); everywhere else the answer is to redirect stdout.
+//
+// `pull` itself now accepts a path-shaped --output as a deprecated alias for
+// --out-file (see resolvePullOutFile), so in practice the hint fires for the
+// commands that have no file flag. The hasOutFile branch stays as the answer
+// for any command that later gains --out-file without the alias.
 func enrichFormatError(value string, err error, hasOutFile bool) error {
 	if !looksLikeFilePath(value) {
 		return err
