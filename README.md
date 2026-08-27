@@ -54,7 +54,8 @@ Prebuilt binaries for macOS, Linux, and Windows (amd64 + arm64), plus
 
 ## Authentication model
 
-Kagi has one interactive credential and no CLI-minted tokens.
+Kagi has one interactive credential, one non-interactive credential, and no
+CLI-minted tokens.
 
 - **Humans** run `kagi login` once. This starts a Keycloak Device Authorization
   Grant, opens your browser, and stores the resulting credentials in your OS
@@ -66,18 +67,20 @@ Kagi has one interactive credential and no CLI-minted tokens.
   logged in. They inherit that session — there is nothing to export, no token to
   manage.
 
-- **`KAGI_TOKEN` is gone.** The CLI no longer authenticates with Personal Access
-  Tokens. If `KAGI_TOKEN` is set it exits with an error asking you to run
-  `kagi login` and unset it.
+- **CI runners** set `KAGI_TOKEN` to an access token minted in the web console.
+  When it is set, it *is* the credential: the CLI authenticates with it as a
+  bearer token and never touches the stored session, so a pipeline never needs
+  to log in. See [Non-interactive auth](#non-interactive-auth-kagi_token) below.
 
 - **The CLI can never create tokens.** There is deliberately no `token create`
-  command. `kagi token list` / `kagi token revoke` are management-only.
+  command — the only way a token comes into existence is through the audited web
+  console. `kagi token list` / `kagi token revoke` are management-only.
 
-- **Truly headless machines** (CI runners, Kubernetes workloads) don't log in at
-  all. They authenticate with **workload identity** — a Kubernetes service
-  account's projected token, exchanged for Kagi access via the operator. You
-  register the cluster and bind the service account with `kagi cluster` and
-  `kagi workload` (below); the workload itself never runs `kagi login`.
+- **Kubernetes workloads** don't log in and don't carry a static token. They
+  authenticate with **workload identity** — a service account's projected token,
+  exchanged for Kagi access via the operator. You register the cluster and bind
+  the service account with `kagi cluster` and `kagi workload` (below); the
+  workload itself never runs `kagi login`.
 
 ```bash
 kagi login    # once, interactively
@@ -85,6 +88,52 @@ kagi logout   # clear stored credentials
 ```
 
 After login the CLI resolves your organization membership (see below).
+
+### Non-interactive auth: `KAGI_TOKEN`
+
+A CI job cannot complete a browser-based device grant, so it authenticates with
+a long-lived access token instead:
+
+```yaml
+env:
+  KAGI_TOKEN: ${{ secrets.KAGI_TOKEN }}
+run: kagi pull --app-id "$APP_ID" --env prod --out-file .env
+```
+
+Mint the token in the Kagi web console (the CLI deliberately cannot). Then:
+
+- **`KAGI_TOKEN` wins over everything.** When it is set and non-empty, the CLI
+  uses it and never reads the stored `kagi login` session — a job that names an
+  identity must get that identity, even on a developer laptop that is also
+  logged in. `kagi login` warns when it sees `KAGI_TOKEN` set.
+
+- **An empty value means unset.** `KAGI_TOKEN=` (an unpopulated CI secret) falls
+  through to the stored session and, failing that, reports "not logged in" —
+  rather than sending an empty bearer token and failing as an opaque 401.
+  Surrounding whitespace is trimmed.
+
+- **The token carries its own organization.** It is bound to one organization
+  server-side, so the CLI does *not* send the `X-Organization-ID` header for it
+  and `kagi org list` / `use` / `current` are refused as inapplicable. There is
+  nothing to select, and a locally selected org would be rejected as a mismatch.
+
+- **The token carries its owner's permissions.** An access token acts as the
+  user who minted it, with that user's grants — it is not a read-only credential
+  and it is not narrower than its owner. Give a CI job a token minted by an
+  account that holds only the access that job needs, and rotate it.
+
+- **The personal environment is user-scoped.** `--personal` resolves to the
+  token owner's personal environment; a machine-type token has none. Under
+  `KAGI_TOKEN` the `run`/`pull` fallback to the `kagi.yaml` environment is
+  suppressed, so a job asking for `personal` fails loudly instead of quietly
+  reading the shared environment.
+
+> **This is a stopgap.** A static token is a long-lived credential sitting in a
+> CI secret store. It exists so pipelines are not blocked, and it is intended to
+> be superseded by OIDC federation — CI exchanging its own short-lived workflow
+> identity token for Kagi access, the way Kubernetes workloads already do via
+> `kagi cluster` / `kagi workload`. Expect `KAGI_TOKEN` to be deprecated once
+> that path is available.
 
 ## Organizations
 
@@ -423,16 +472,23 @@ Run `kagi completion <shell> --help` for the exact install steps per shell.
 | `-o, --output` | Output format: `table`, `json`, `yaml` | `table` |
 | `--no-color` | Disable colored output | off |
 
+`-o, --output` names the output **format**, never a file to write to. To write
+`kagi pull` output to a file use `--out-file <path>`; everywhere else redirect
+stdout. (Before v0.20.0 `--output` on `pull` was the file flag; passing a path
+to `-o` now fails with a message pointing at `--out-file`.)
+
 ### Environment variables
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
+| `KAGI_TOKEN` | Access token for non-interactive use; overrides the stored login session | unset |
 | `KAGI_API_URL` | Override the API base URL | `https://api.kagi.pw` |
 | `KAGI_KEYCLOAK_ISSUER` | Override the Keycloak issuer | `https://auth.kagi.pw/realms/kagi` |
 | `KAGI_DISCOVERY_TIMEOUT` | OIDC discovery retry budget (Go duration, e.g. `10s`) | built-in default |
 
 `KAGI_API_URL` / `KAGI_KEYCLOAK_ISSUER` take precedence over config-file values.
-`KAGI_TOKEN` is **not** an authentication knob — the CLI errors if it is set.
+See [Non-interactive auth](#non-interactive-auth-kagi_token) for how `KAGI_TOKEN`
+interacts with the stored session, the organization header, and `--personal`.
 
 ### Config files
 

@@ -53,18 +53,26 @@ type KagiClient struct {
 	token      string
 	sdkClient  *kagi.Client
 
-	// orgID is the active organization UUID, sent as X-Organization-ID on write
-	// requests. Empty until an organization has been selected.
+	// orgID is the active organization UUID, sent as X-Organization-ID on JWT
+	// (human) write requests. Empty under PAT auth.
 	orgID string
+	// isPAT reports whether token came from KAGI_TOKEN (a Personal Access
+	// Token). When true the org header is never sent — the org is bound to the
+	// token server-side and a mismatched header returns 403.
+	isPAT bool
 }
+
+// IsPAT reports whether this client authenticates with a Personal Access Token
+// supplied via KAGI_TOKEN, rather than with the stored `kagi login` session.
+func (c *KagiClient) IsPAT() bool { return c.isPAT }
 
 // OrgID returns the active organization UUID configured for JWT requests.
 func (c *KagiClient) OrgID() string { return c.orgID }
 
 // NewKagiClientWithToken creates a client with an explicit JWT (used during the
-// login flow to call read-only org endpoints before an org is selected). Pass an
-// empty orgID for the org-discovery call right after device login; the org
-// header is attached only once an org is known.
+// login flow to call read-only org endpoints before an org is selected). The
+// token is treated as a JWT so the org header may be attached if orgID is set;
+// the org-discovery call right after device login runs with no org known.
 func NewKagiClientWithToken(baseURL, token string) *KagiClient {
 	return &KagiClient{
 		baseURL: baseURL,
@@ -72,12 +80,52 @@ func NewKagiClientWithToken(baseURL, token string) *KagiClient {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		sdkClient: kagi.NewOrgClient(baseURL, token, ""),
+		sdkClient: kagi.NewOrgClient(baseURL, token, "", false),
 	}
 }
 
-// NewKagiClient creates a new client, resolving the auth token from env var or credential store.
+// NewKagiClient creates a new client, resolving the auth token from KAGI_TOKEN
+// or, failing that, from the stored `kagi login` session.
+//
+// KAGI_TOKEN takes precedence: it is the non-interactive credential for CI and
+// other headless callers, where there is no session to fall back on. It also
+// must win on a developer machine that happens to have both — a job that sets
+// KAGI_TOKEN has stated which identity it wants, and silently acting as the
+// logged-in human instead would be a confused deputy. An empty or
+// whitespace-only value counts as unset (see auth.StaticToken), so an
+// unpopulated CI secret falls through to the session rather than
+// authenticating with an empty bearer token and failing as an opaque 401.
 func NewKagiClient(baseURL, issuerURL string) (*KagiClient, error) {
+	if pat := auth.StaticToken(); pat != "" {
+		return newPATClient(baseURL, pat), nil
+	}
+	return NewSessionClient(baseURL, issuerURL)
+}
+
+// newPATClient builds a client authenticated with a Personal Access Token. A
+// PAT is org-bound server-side, so orgID stays empty and X-Organization-ID is
+// never attached — sending a mismatched org would be rejected with 403 (the
+// confused-deputy guard).
+func newPATClient(baseURL, pat string) *KagiClient {
+	return &KagiClient{
+		baseURL: baseURL,
+		token:   pat,
+		isPAT:   true,
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+		},
+		sdkClient: kagi.NewOrgClient(baseURL, pat, "", true),
+	}
+}
+
+// NewSessionClient creates a client from the stored `kagi login` session only,
+// ignoring KAGI_TOKEN, refreshing the access token when it has expired.
+//
+// `kagi login` uses this rather than NewKagiClient to judge whether the stored
+// session is reusable: with a PAT in the environment NewKagiClient answers
+// about the PAT, and login would report "Already logged in" about a session it
+// never actually checked.
+func NewSessionClient(baseURL, issuerURL string) (*KagiClient, error) {
 	c := &KagiClient{
 		baseURL:   baseURL,
 		issuerURL: issuerURL,
@@ -86,9 +134,9 @@ func NewKagiClient(baseURL, issuerURL string) (*KagiClient, error) {
 		},
 	}
 
-	// Auth resolves solely from the stored JWT session. The active org is sent
-	// via the X-Organization-ID header, sourced from the persisted config (set
-	// via `kagi org use`).
+	// Auth resolves from the stored JWT session. The active org is sent via the
+	// X-Organization-ID header, sourced from the persisted config (set via
+	// `kagi org use`).
 	cfg := config.Load()
 	c.orgID = cfg.OrganizationID
 
@@ -175,7 +223,7 @@ func NewKagiClient(baseURL, issuerURL string) (*KagiClient, error) {
 	}
 
 	c.token = creds.AccessToken
-	c.sdkClient = kagi.NewOrgClient(baseURL, creds.AccessToken, c.orgID)
+	c.sdkClient = kagi.NewOrgClient(baseURL, creds.AccessToken, c.orgID, false)
 	return c, nil
 }
 
@@ -408,20 +456,23 @@ func mapHTTPError(status int, body []byte) error {
 	}
 }
 
-// setAuthHeaders sets the Authorization + Content-Type headers and, once an
-// organization has been selected, the X-Organization-ID header.
+// setAuthHeaders sets the Authorization + Content-Type headers and, for JWT
+// (human) auth only, the X-Organization-ID header. PAT auth omits the org
+// header — the org is bound to the token and a mismatch returns 403.
 func (c *KagiClient) setAuthHeaders(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "application/json")
-	if c.orgID != "" {
+	if !c.isPAT && c.orgID != "" {
 		req.Header.Set(kagi.HeaderOrganizationID, c.orgID)
 	}
 }
 
-// requireOrgForJWT fails fast on write requests when no active organization has
-// been selected, rather than letting the backend reject the request opaquely.
+// requireOrgForJWT fails fast on JWT (human) write requests when no active
+// organization has been selected, rather than letting the backend reject the
+// request opaquely. PAT auth is exempt — the org is bound to the token, and a
+// CI runner has no `kagi org use` selection to make.
 func (c *KagiClient) requireOrgForJWT() error {
-	if c.orgID == "" {
+	if !c.isPAT && c.orgID == "" {
 		return fmt.Errorf("no organization selected. Run 'kagi org use <slug>' (see 'kagi org list')")
 	}
 	return nil

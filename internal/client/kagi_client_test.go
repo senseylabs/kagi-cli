@@ -5,10 +5,16 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 
 	kagi "github.com/senseylabs/kagi-sdk"
+	"github.com/zalando/go-keyring"
+
+	"github.com/senseylabs/kagi-cli/internal/auth"
 )
 
 // newTestKagiClient builds a KagiClient wired to a test server, with an active
@@ -19,7 +25,7 @@ func newTestKagiClient(baseURL string) *KagiClient {
 		token:      "test-token",
 		orgID:      "org-1",
 		httpClient: http.DefaultClient,
-		sdkClient:  kagi.NewOrgClient(baseURL, "test-token", "org-1"),
+		sdkClient:  kagi.NewOrgClient(baseURL, "test-token", "org-1", false),
 	}
 }
 
@@ -167,5 +173,202 @@ func TestAccessTokenItemsPath(t *testing.T) {
 		if got := accessTokenItemsPath(tc.folderPath, tc.page); got != tc.want {
 			t.Errorf("accessTokenItemsPath(%q, %d) = %q, want %q", tc.folderPath, tc.page, got, tc.want)
 		}
+	}
+}
+
+// --- KAGI_TOKEN (PAT) vs stored-session auth ---------------------------------
+
+// authProbeServer records the Authorization and X-Organization-ID headers of the
+// first request it receives and answers with an empty data envelope, so both the
+// SDK read path and the CLI write path can be probed without real credentials.
+func authProbeServer(t *testing.T, gotAuth *string, gotOrg *string, orgPresent *bool) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*gotAuth = r.Header.Get("Authorization")
+		values, ok := r.Header[http.CanonicalHeaderKey(kagi.HeaderOrganizationID)]
+		*orgPresent = ok
+		if ok {
+			*gotOrg = values[0]
+		}
+		resp := map[string]interface{}{"data": []map[string]string{}, "message": "ok", "status": 200}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+}
+
+// seedSession writes a hermetic home with a stored, unexpired login session and
+// a kagi.yaml pinning an active organization, mirroring `kagi login` followed by
+// `kagi org use`. It returns the org UUID it pinned.
+func seedSession(t *testing.T) string {
+	t.Helper()
+	keyring.MockInit()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	const orgID = "11111111-2222-3333-4444-555555555555"
+	dir := t.TempDir()
+	cfg := "organization: sensey\norganization-id: " + orgID + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "kagi.yaml"), []byte(cfg), 0600); err != nil {
+		t.Fatalf("write kagi.yaml: %v", err)
+	}
+	t.Chdir(dir)
+
+	store := auth.NewTokenStore()
+	if err := store.Save(auth.Credentials{
+		AccessToken:  "stored-session-jwt",
+		RefreshToken: "stored-refresh",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("seed credentials: %v", err)
+	}
+	return orgID
+}
+
+// With KAGI_TOKEN set, the CLI authenticates with it rather than with the stored
+// session, and — because a PAT is org-bound server-side — never sends
+// X-Organization-ID, even though an active org is pinned in kagi.yaml. Sending a
+// mismatched org header is rejected with 403 by the API's tenancy filter, which
+// is exactly how CI would break.
+func TestNewKagiClient_StaticTokenSelectsPATAuth(t *testing.T) {
+	seedSession(t)
+	t.Setenv("KAGI_TOKEN", "vv_ci_token")
+
+	var gotAuth, gotOrg string
+	var orgPresent bool
+	ts := authProbeServer(t, &gotAuth, &gotOrg, &orgPresent)
+	defer ts.Close()
+
+	c, err := NewKagiClient(ts.URL, "")
+	if err != nil {
+		t.Fatalf("NewKagiClient: %v", err)
+	}
+	if !c.IsPAT() {
+		t.Fatal("expected a PAT client when KAGI_TOKEN is set")
+	}
+	if c.OrgID() != "" {
+		t.Errorf("PAT client should carry no orgID, got %q", c.OrgID())
+	}
+
+	// SDK read path.
+	if _, err := c.ListEnvironments("app-1"); err != nil {
+		t.Fatalf("ListEnvironments: %v", err)
+	}
+	if gotAuth != "Bearer vv_ci_token" {
+		t.Errorf("SDK path Authorization = %q, want %q", gotAuth, "Bearer vv_ci_token")
+	}
+	if orgPresent {
+		t.Errorf("SDK path must omit %s for a PAT, got %q", kagi.HeaderOrganizationID, gotOrg)
+	}
+
+	// CLI write/list path (doRequest -> setAuthHeaders + requireOrgForJWT).
+	gotAuth, gotOrg, orgPresent = "", "", false
+	if _, err := c.ListSecrets("app-1", "prod"); err != nil {
+		t.Fatalf("ListSecrets: %v", err)
+	}
+	if gotAuth != "Bearer vv_ci_token" {
+		t.Errorf("CLI path Authorization = %q, want %q", gotAuth, "Bearer vv_ci_token")
+	}
+	if orgPresent {
+		t.Errorf("CLI path must omit %s for a PAT, got %q", kagi.HeaderOrganizationID, gotOrg)
+	}
+}
+
+// With KAGI_TOKEN unset, nothing about the device-grant session path changes:
+// the stored access token is used and the pinned org is sent as
+// X-Organization-ID.
+func TestNewKagiClient_NoStaticTokenUsesStoredSession(t *testing.T) {
+	orgID := seedSession(t)
+	t.Setenv("KAGI_TOKEN", "")
+
+	var gotAuth, gotOrg string
+	var orgPresent bool
+	ts := authProbeServer(t, &gotAuth, &gotOrg, &orgPresent)
+	defer ts.Close()
+
+	c, err := NewKagiClient(ts.URL, "")
+	if err != nil {
+		t.Fatalf("NewKagiClient: %v", err)
+	}
+	if c.IsPAT() {
+		t.Fatal("expected a session client when KAGI_TOKEN is unset")
+	}
+	if c.OrgID() != orgID {
+		t.Errorf("OrgID = %q, want %q", c.OrgID(), orgID)
+	}
+
+	if _, err := c.ListSecrets("app-1", "prod"); err != nil {
+		t.Fatalf("ListSecrets: %v", err)
+	}
+	if gotAuth != "Bearer stored-session-jwt" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer stored-session-jwt")
+	}
+	if !orgPresent {
+		t.Fatalf("session auth must send %s", kagi.HeaderOrganizationID)
+	}
+	if gotOrg != orgID {
+		t.Errorf("%s = %q, want %q", kagi.HeaderOrganizationID, gotOrg, orgID)
+	}
+}
+
+// An empty or whitespace-only KAGI_TOKEN is indistinguishable from unset: an
+// unpopulated CI secret must fall through to the stored session rather than
+// authenticate with an empty bearer token and fail as an opaque 401.
+func TestNewKagiClient_EmptyStaticTokenTreatedAsUnset(t *testing.T) {
+	for _, value := range []string{"", "   ", "\n", "\t "} {
+		orgID := seedSession(t)
+		t.Setenv("KAGI_TOKEN", value)
+
+		c, err := NewKagiClient("http://127.0.0.1:0", "")
+		if err != nil {
+			t.Fatalf("KAGI_TOKEN=%q: NewKagiClient: %v", value, err)
+		}
+		if c.IsPAT() {
+			t.Errorf("KAGI_TOKEN=%q should not select PAT auth", value)
+		}
+		if c.token != "stored-session-jwt" {
+			t.Errorf("KAGI_TOKEN=%q: token = %q, want the stored session token", value, c.token)
+		}
+		if c.OrgID() != orgID {
+			t.Errorf("KAGI_TOKEN=%q: OrgID = %q, want %q", value, c.OrgID(), orgID)
+		}
+	}
+}
+
+// NewSessionClient ignores KAGI_TOKEN entirely. `kagi login` relies on this to
+// judge whether the STORED session is reusable — asking NewKagiClient with a PAT
+// in the environment would answer about the PAT and report "Already logged in"
+// about a session it never checked.
+func TestNewSessionClient_IgnoresStaticToken(t *testing.T) {
+	orgID := seedSession(t)
+	t.Setenv("KAGI_TOKEN", "vv_ci_token")
+
+	c, err := NewSessionClient("http://127.0.0.1:0", "")
+	if err != nil {
+		t.Fatalf("NewSessionClient: %v", err)
+	}
+	if c.IsPAT() {
+		t.Fatal("NewSessionClient must never select PAT auth")
+	}
+	if c.token != "stored-session-jwt" {
+		t.Errorf("token = %q, want the stored session token", c.token)
+	}
+	if c.OrgID() != orgID {
+		t.Errorf("OrgID = %q, want %q", c.OrgID(), orgID)
+	}
+}
+
+// A PAT is exempt from the "no organization selected" fail-fast on the CLI write
+// path: its org is bound to the token, so there is nothing to select.
+func TestRequireOrgForJWT_PATExempt(t *testing.T) {
+	pat := &KagiClient{isPAT: true}
+	if err := pat.requireOrgForJWT(); err != nil {
+		t.Errorf("PAT client should be exempt from the org requirement, got: %v", err)
+	}
+
+	session := &KagiClient{}
+	if err := session.requireOrgForJWT(); err == nil {
+		t.Error("session client with no org selected should fail fast")
 	}
 }

@@ -237,7 +237,8 @@ func joinFolderPath(base, slug string) string {
 // writeSetupConfig writes the folder-model kagi.yaml binding. Addressing uses
 // the stable app-id; folder-path is informational only. The active organization
 // (slug + UUID) is pinned when known so the binding is reproducible across
-// sessions and directories.
+// sessions and directories under a 'kagi login' session — under a KAGI_TOKEN
+// access token the org is bound to the token and the pinned value is ignored.
 func writeSetupConfig(folderPath, appID, envSlug string) error {
 	// Pin the organization from the account-level (home) selection, NOT the merged
 	// config. config.Load() folds in the cwd kagi.yaml we are about to overwrite,
