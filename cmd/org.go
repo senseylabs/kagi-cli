@@ -87,10 +87,24 @@ func runOrgList(cmd *cobra.Command, args []string) error {
 
 	orgs, err := vc.ListOrganizations()
 	if err != nil {
+		if kagi.IsNotOnboarded(err) {
+			// The refusal is definitive about the account, so the state read only
+			// supplies the wording. If it disagrees, fall through to the generic
+			// wrap rather than inventing an answer.
+			if refusal := refuseIfNotOnboarded(u, vc, true); refusal != nil {
+				return refusal
+			}
+		}
 		return ui.Wrapf(err, "failed to list organizations")
 	}
 
+	// An empty list from a not-yet-onboarded account is the backend telling the
+	// caller they have not been placed anywhere yet, not that their memberships
+	// vanished. Say which it is instead of leaving them to guess.
 	if len(orgs) == 0 {
+		if refusal := refuseIfNotOnboarded(u, vc, false); refusal != nil {
+			return refusal
+		}
 		u.Info("You do not belong to any organizations yet")
 	}
 
@@ -128,6 +142,14 @@ func runOrgUse(cmd *cobra.Command, args []string) error {
 
 	orgs, err := vc.ListOrganizations()
 	if err != nil {
+		if kagi.IsNotOnboarded(err) {
+			// The refusal is definitive about the account, so the state read only
+			// supplies the wording. If it disagrees, fall through to the generic
+			// wrap rather than inventing an answer.
+			if refusal := refuseIfNotOnboarded(u, vc, true); refusal != nil {
+				return refusal
+			}
+		}
 		return ui.Wrapf(err, "failed to list organizations")
 	}
 
@@ -157,6 +179,11 @@ func runOrgUse(cmd *cobra.Command, args []string) error {
 		available = append(available, o.Slug)
 	}
 	if len(available) == 0 {
+		// Nothing to select from. When that is because setup never finished,
+		// name the actual situation rather than the symptom.
+		if refusal := refuseIfNotOnboarded(u, vc, false); refusal != nil {
+			return refusal
+		}
 		return ui.Errorf("you are not a member of any organization, so %q cannot be selected", slug)
 	}
 	return ui.Errorf("you are not a member of organization %q (available: %s)", slug, strings.Join(available, ", "))
@@ -223,4 +250,37 @@ func completeOrgSlugs(cmd *cobra.Command, args []string, toComplete string) ([]s
 		slugs = append(slugs, o.Slug)
 	}
 	return slugs, cobra.ShellCompDirectiveNoFileComp
+}
+
+// refuseIfNotOnboarded prints the caller's own setup situation and returns the
+// error the command exits on — or nil when the account is fully set up, so the
+// caller keeps its own wording for a genuinely empty membership list.
+//
+// Unlike `kagi login` it leaves the stored session alone: discarding
+// credentials is a decision for the command that establishes them, and a read
+// command that logged the user out as a side effect of a refusal would be a
+// surprise. The session is not the problem here — the account is not ready.
+//
+// provenNotOnboarded says whether the backend has ALREADY refused this caller
+// with KGI_SEC_038. It decides what an unreadable setup state may become: with
+// the refusal in hand the situation is settled and only the wording degrades,
+// but without it all that is known is an empty membership list — which a fully
+// onboarded account also produces. Turning a timeout or a 502 into "you have
+// not finished onboarding" would refuse a legitimate user over a network blip,
+// so the read failure is surfaced as itself and the caller keeps its own
+// wording instead.
+func refuseIfNotOnboarded(u *ui.UI, vc *client.KagiClient, provenNotOnboarded bool) error {
+	status, readErr := readOnboardingStatus(vc)
+	if readErr != nil {
+		u.Warn("%v", readErr)
+		if !provenNotOnboarded {
+			return nil
+		}
+		status = &client.OnboardingStatus{}
+	}
+	if status.EffectiveState() == kagi.OnboardingStateComplete {
+		return nil
+	}
+	describeOnboardingSituation(u, status)
+	return onboardingRefusalError(status)
 }

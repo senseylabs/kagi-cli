@@ -213,3 +213,83 @@ type APIResponse[T any] struct {
 	Message string `json:"message"`
 	Status  int    `json:"status"`
 }
+
+// OnboardingState is the caller's own onboarding situation as reported by
+// GET /kagi/onboarding/state. It is the one endpoint an account that has not
+// finished onboarding may read about itself: every other route answers
+// KGI_SEC_038 until onboarding completes.
+type OnboardingState string
+
+// The four states the backend reports. The three that overlap with a bootstrap
+// outcome deliberately reuse that outcome's wire string, so the CLI and the
+// other Kagi clients share one vocabulary.
+const (
+	// OnboardingStateRequired means the person has not been placed anywhere
+	// yet: they finish setup by creating their own organization or by
+	// requesting to join one. It is also the safe reading of an unrecognized
+	// state (see OnboardingStatus.EffectiveState).
+	OnboardingStateRequired OnboardingState = "ONBOARDING_REQUIRED"
+	// OnboardingStateJoinRequestPending means a request to join the
+	// organization that owns the caller's email domain has been recorded and is
+	// waiting for one of its administrators to approve it.
+	OnboardingStateJoinRequestPending OnboardingState = "JOIN_REQUEST_PENDING"
+	// OnboardingStateOrgNotAvailable means the organization claiming the
+	// caller's email domain cannot take members right now (suspended, billing
+	// locked, or on a plan without domain join). This is the one blocked state
+	// where creating an own organization stays available.
+	OnboardingStateOrgNotAvailable OnboardingState = "ORG_NOT_AVAILABLE"
+	// OnboardingStateComplete means the account is ACTIVE and onboarding is
+	// done; OrganizationSlug names the workspace to work in.
+	OnboardingStateComplete OnboardingState = "COMPLETE"
+)
+
+// OnboardingStatus is the payload of GET /kagi/onboarding/state: a caller's own
+// onboarding situation.
+//
+// Nullability follows the state. OrganizationID/OrganizationSlug are populated
+// only for COMPLETE; JoinRequestOrganizationName/Slug only for
+// JOIN_REQUEST_PENDING and ORG_NOT_AVAILABLE. A JSON null unmarshals to the
+// empty string, so callers must treat "" as "not reported" and keep a fallback
+// label rather than printing a blank organization name.
+//
+// CanCreateOwnOrganization is the SERVER's verdict on whether creating an own
+// organization is still on offer. It is NOT derivable from State — the backend
+// answers false for an ONBOARDING_REQUIRED caller whose email domain is claimed
+// by an organization that would refuse the create (KGI_STA_002) — so it must be
+// read from the wire, never inferred.
+type OnboardingStatus struct {
+	State                       OnboardingState `json:"state"`
+	UserStatus                  string          `json:"userStatus"`
+	OrganizationID              string          `json:"organizationId"`
+	OrganizationSlug            string          `json:"organizationSlug"`
+	JoinRequestOrganizationName string          `json:"joinRequestOrganizationName"`
+	JoinRequestOrganizationSlug string          `json:"joinRequestOrganizationSlug"`
+	CanCreateOwnOrganization    bool            `json:"canCreateOwnOrganization"`
+}
+
+// EffectiveState returns the state to act on, collapsing anything this build
+// does not recognize (a state added by a newer backend, or a missing field) to
+// OnboardingStateRequired. That is the safe reading: it points the person at
+// setup instead of reporting an approval that may not exist.
+func (s OnboardingStatus) EffectiveState() OnboardingState {
+	switch s.State {
+	case OnboardingStateRequired,
+		OnboardingStateJoinRequestPending,
+		OnboardingStateOrgNotAvailable,
+		OnboardingStateComplete:
+		return s.State
+	default:
+		return OnboardingStateRequired
+	}
+}
+
+// JoinTargetLabel names the organization a blocked state refers to, preferring
+// its display name and falling back to its slug. It returns "" when the backend
+// reported neither, so the caller can substitute its own wording rather than
+// printing an empty name.
+func (s OnboardingStatus) JoinTargetLabel() string {
+	if s.JoinRequestOrganizationName != "" {
+		return s.JoinRequestOrganizationName
+	}
+	return s.JoinRequestOrganizationSlug
+}

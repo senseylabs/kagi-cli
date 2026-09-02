@@ -84,6 +84,22 @@ func (c *Client) ListOrganizations(ctx context.Context) ([]Organization, error) 
 	return resp.Data, nil
 }
 
+// GetOnboardingState reports the authenticated caller's own onboarding
+// situation: whether they still have to be placed in an organization, whether a
+// join request of theirs is waiting for approval, or whether onboarding is
+// done. It is JWT (human) auth only — a Personal Access Token is issued to an
+// already-onboarded owner and the endpoint answers it 401.
+//
+// This is the only route a not-yet-onboarded account may read, so it is what
+// the CLI calls to explain a login that cannot proceed.
+func (c *Client) GetOnboardingState(ctx context.Context) (*OnboardingStatus, error) {
+	var resp APIResponse[OnboardingStatus]
+	if err := c.doGet(ctx, onboardingStatePath, &resp); err != nil {
+		return nil, err
+	}
+	return &resp.Data, nil
+}
+
 // ListFolderChildren browses a folder by path and returns its child folders
 // and, for the SECRETS library, the apps directly under it. The path is the
 // human-readable folder path (e.g. "/fepatex/backend"); an empty or "/" path
@@ -336,6 +352,21 @@ func (c *Client) GetPasswordHistory(ctx context.Context, passwordID string) ([]P
 // selected — it is how a JWT user discovers which orgs they may select.
 const orgListPath = "/kagi/organizations"
 
+// onboardingStatePath reports the caller's own onboarding situation. It is
+// tenancy-exempt server-side (it lives under the /kagi/onboarding prefix, which
+// the backend's organization-context filter skips), so it is reachable with no
+// organization selected — which is the whole point: it is what an account that
+// has not finished onboarding reads to learn why nothing else works.
+const onboardingStatePath = "/kagi/onboarding/state"
+
+// requiresSelectedOrg reports whether path is an org-scoped route that a JWT
+// client must not send without an active organization. The two discovery reads
+// are exempt: they are how a caller with no organization learns what to do
+// next, so failing them fast would withhold the answer.
+func requiresSelectedOrg(path string) bool {
+	return path != orgListPath && path != onboardingStatePath
+}
+
 // ErrNoOrganizationSelected is returned for org-scoped JWT requests when no
 // active organization has been configured.
 var ErrNoOrganizationSelected = fmt.Errorf("no organization selected. Run 'kagi org use <slug>' (see 'kagi org list')")
@@ -421,8 +452,9 @@ func fetchAllPages[T any](ctx context.Context, c *Client, resource string, pathF
 func (c *Client) doGet(ctx context.Context, path string, result any) error {
 	// JWT auth needs an active org for every org-scoped request. Fail fast with
 	// an actionable error rather than letting the backend reject it opaquely.
-	// The org-list endpoint is exempt — it is how the user discovers orgs.
-	if c.orgAware && c.orgID == "" && path != orgListPath {
+	// The discovery reads are exempt — they are how a user with no organization
+	// finds out which orgs they may select, or why they have none yet.
+	if c.orgAware && c.orgID == "" && requiresSelectedOrg(path) {
 		return ErrNoOrganizationSelected
 	}
 

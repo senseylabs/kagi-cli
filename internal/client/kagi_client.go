@@ -37,12 +37,45 @@ type PasswordListItem = kagi.PasswordListItem
 type PasswordResolve = kagi.PasswordResolve
 type PasswordReveal = kagi.PasswordReveal
 type PasswordHistory = kagi.PasswordHistory
+type OnboardingState = kagi.OnboardingState
+type OnboardingStatus = kagi.OnboardingStatus
 
-// APIErrorResponse represents an error response from the API.
+// APIErrorResponse represents an error response from the API. It covers the
+// human-readable half of the CustomResponse envelope; the machine-readable
+// error.code is parsed separately (see errorEnvelope) because callers branch on
+// the code, never on the message text.
 type APIErrorResponse struct {
 	Message string `json:"message"`
 	Status  int    `json:"status"`
 }
+
+// errorEnvelope is the nested error object of the backend CustomResponse
+// envelope ({success, message, data, pagination, error:{code,message}}). The
+// code is the only stable identifier of WHY a request was refused — two
+// unrelated refusals share HTTP 403 — so it is parsed here and carried on the
+// returned error even when the message shown to the user is the friendly one.
+type errorEnvelope struct {
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// httpError is a non-2xx response rendered for a human while still carrying the
+// machine-readable backend code.
+//
+// Error() is the friendly text the CLI has always printed, so no existing
+// message changes. Unwrap exposes an *kagi.APIError, so errors.As and the
+// kagi.IsNotOnboarded / kagi.IsDomainClaimedByOtherOrg classifiers see the wire
+// code through it — without that, every caller would be back to matching
+// substrings of the message.
+type httpError struct {
+	friendly string
+	api      *kagi.APIError
+}
+
+func (e *httpError) Error() string { return e.friendly }
+func (e *httpError) Unwrap() error { return e.api }
 
 // KagiClient handles HTTP communication with the Village Kagi API.
 // Read-only operations are delegated to the shared SDK client.
@@ -250,6 +283,13 @@ func (c *KagiClient) ListOrganizations() ([]Organization, error) {
 	return c.sdkClient.ListOrganizations(context.Background())
 }
 
+// GetOnboardingState reports this caller's own onboarding situation. It is the
+// one read an account that has not finished onboarding may perform, so it is
+// how the CLI explains a login it has to refuse.
+func (c *KagiClient) GetOnboardingState() (*OnboardingStatus, error) {
+	return c.sdkClient.GetOnboardingState(context.Background())
+}
+
 // ListFolderChildren browses a SECRETS folder path and returns its child
 // folders and the apps directly under it.
 func (c *KagiClient) ListFolderChildren(path string) (*FolderChildren, error) {
@@ -430,29 +470,64 @@ func (c *KagiClient) do(method, path string, payload interface{}) ([]byte, error
 	return body, nil
 }
 
-// mapHTTPError turns a non-2xx status + body into a friendly error. The backend
-// envelope message wins when present; otherwise a per-status fallback is used.
+// mapHTTPError turns a non-2xx status + body into a friendly error that still
+// carries the backend wire code.
+//
+// Precedence: a code the CLI has specific wording for wins, because the generic
+// envelope message for those refusals ("Your account has not finished
+// onboarding.") reads as a wall rather than as a next step. Otherwise the
+// envelope message wins, and failing that a per-status fallback is used. In
+// every branch the parsed code is attached, so callers can classify the failure
+// with kagi.IsNotOnboarded and friends regardless of which message was chosen.
 func mapHTTPError(status int, body []byte) error {
+	var env errorEnvelope
+	// rule-10-no-op -- reason: a body that is not the envelope (a proxy error
+	// page, an empty 502) is an expected shape here, not a failure. It simply
+	// yields no code, and the message fallbacks below cover it; reporting a
+	// parse error instead would replace the server's reason with our own.
+	_ = json.Unmarshal(body, &env)
+
 	var apiErr APIErrorResponse
-	if json.Unmarshal(body, &apiErr) == nil && apiErr.Message != "" {
-		return fmt.Errorf("%s", apiErr.Message)
+	// rule-10-no-op -- reason: same body, same reasoning as above.
+	_ = json.Unmarshal(body, &apiErr)
+
+	wrap := func(friendly string) error {
+		return &httpError{
+			friendly: friendly,
+			api: &kagi.APIError{
+				Status:  status,
+				Code:    env.Error.Code,
+				Message: apiErr.Message,
+			},
+		}
+	}
+
+	switch env.Error.Code {
+	case kagi.ErrCodeAccountNotOnboarded:
+		return wrap("your Kagi account has not finished setting up yet. Finish setting up in the Kagi portal, then run 'kagi login' again")
+	case kagi.ErrCodeDomainClaimedByOtherOrg:
+		return wrap("your email domain belongs to an existing organization, so you cannot create your own. Request to join it in the Kagi portal instead")
+	}
+
+	if apiErr.Message != "" {
+		return wrap(apiErr.Message)
 	}
 
 	switch status {
 	case 401:
-		return fmt.Errorf("unauthorized. Run 'kagi login' to authenticate")
+		return wrap("unauthorized. Run 'kagi login' to authenticate")
 	case 403:
-		return fmt.Errorf("access denied. You may not have permission for this operation")
+		return wrap("access denied. You may not have permission for this operation")
 	case 404:
-		return fmt.Errorf("resource not found")
+		return wrap("resource not found")
 	case 500:
-		return fmt.Errorf("server error. Try again later")
+		return wrap("server error. Try again later")
 	default:
 		bodyStr := string(body)
 		if len(bodyStr) > 200 {
 			bodyStr = bodyStr[:200] + "..."
 		}
-		return fmt.Errorf("request failed (%d): %s", status, bodyStr)
+		return wrap(fmt.Sprintf("request failed (%d): %s", status, bodyStr))
 	}
 }
 

@@ -2,12 +2,14 @@ package client
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -372,3 +374,126 @@ func TestRequireOrgForJWT_PATExempt(t *testing.T) {
 		t.Error("session client with no org selected should fail fast")
 	}
 }
+
+// --- error envelope -----------------------------------------------------------
+
+// The not-onboarded refusal is recognized by its wire code and answered with a
+// next step. Before this, mapHTTPError parsed only message/status, so the code
+// never reached the caller and a brand-new user was told "access denied" —
+// a permission problem they could do nothing about, when the real answer is
+// "finish setting up".
+func TestMapHTTPError_NotOnboardedIsActionable(t *testing.T) {
+	body := []byte(`{"success": false, "message": "Your account has not finished onboarding.", "data": null, "pagination": null, "error": {"code": "KGI_SEC_038", "message": "not onboarded"}}`)
+
+	err := mapHTTPError(http.StatusForbidden, body)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !kagi.IsNotOnboarded(err) {
+		t.Fatalf("the wire code must survive on the returned error, got: %v", err)
+	}
+
+	msg := err.Error()
+	for _, banned := range []string{"access denied", "permission", "403"} {
+		if contains(msg, banned) {
+			t.Errorf("not-onboarded must not read as a permission failure, got %q", msg)
+		}
+	}
+	if !contains(msg, "kagi login") {
+		t.Errorf("expected the message to name the command to run after setup, got %q", msg)
+	}
+}
+
+// The organization-creation refusal gets its own wording: retrying the create
+// can never succeed, so the message points at joining instead.
+func TestMapHTTPError_DomainClaimedIsActionable(t *testing.T) {
+	body := []byte(`{"success": false, "message": "Domain claimed.", "error": {"code": "KGI_STA_002"}}`)
+
+	err := mapHTTPError(http.StatusForbidden, body)
+	if !kagi.IsDomainClaimedByOtherOrg(err) {
+		t.Fatalf("the wire code must survive on the returned error, got: %v", err)
+	}
+	if !contains(err.Error(), "join") {
+		t.Errorf("expected the message to point at joining the existing organization, got %q", err.Error())
+	}
+}
+
+// Every other refusal keeps the exact message the CLI has always printed — the
+// envelope message when there is one — while now also carrying the code, so
+// this change adds classification without rewording anything else.
+func TestMapHTTPError_KeepsEnvelopeMessageForOtherCodes(t *testing.T) {
+	body := []byte(`{"success": false, "message": "organization mismatch", "error": {"code": "KGI_TEN_004"}}`)
+
+	err := mapHTTPError(http.StatusForbidden, body)
+	if got := err.Error(); got != "organization mismatch" {
+		t.Errorf("unexpected message: got %q, want %q", got, "organization mismatch")
+	}
+	if kagi.IsNotOnboarded(err) {
+		t.Error("KGI_TEN_004 must not classify as the not-onboarded refusal")
+	}
+
+	var apiErr *kagi.APIError
+	if !asAPIError(err, &apiErr) {
+		t.Fatalf("expected the error to unwrap to *kagi.APIError, got %T", err)
+	}
+	if apiErr.Code != "KGI_TEN_004" || apiErr.Status != http.StatusForbidden {
+		t.Errorf("unexpected carried error: %+v", apiErr)
+	}
+}
+
+// A body that is not the envelope at all (a proxy error page, an empty 502)
+// still yields the per-status fallback rather than an empty message.
+func TestMapHTTPError_StatusFallbackWithoutEnvelope(t *testing.T) {
+	err := mapHTTPError(http.StatusUnauthorized, []byte("<html>gateway</html>"))
+	if got := err.Error(); got != "unauthorized. Run 'kagi login' to authenticate" {
+		t.Errorf("unexpected message: got %q", got)
+	}
+	if kagi.IsNotOnboarded(err) {
+		t.Error("a body with no envelope carries no wire code")
+	}
+}
+
+// --- onboarding state ---------------------------------------------------------
+
+// The state read is delegated to the SDK client unchanged, so the CLI sees the
+// same payload the other Kagi clients do.
+func TestGetOnboardingState(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/kagi/onboarding/state" {
+			t.Errorf("unexpected path: got %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"state":                       "ORG_NOT_AVAILABLE",
+				"userStatus":                  "PENDING_ONBOARDING",
+				"joinRequestOrganizationName": "Sensey B.V.",
+				"canCreateOwnOrganization":    true,
+			},
+			"message": "Onboarding state retrieved successfully",
+			"status":  200,
+		})
+	}))
+	defer ts.Close()
+
+	status, err := newTestKagiClient(ts.URL).GetOnboardingState()
+	if err != nil {
+		t.Fatalf("GetOnboardingState returned error: %v", err)
+	}
+	if status.EffectiveState() != kagi.OnboardingStateOrgNotAvailable {
+		t.Errorf("unexpected state: got %q", status.State)
+	}
+	if status.JoinTargetLabel() != "Sensey B.V." {
+		t.Errorf("unexpected join target: got %q", status.JoinTargetLabel())
+	}
+	if !status.CanCreateOwnOrganization {
+		t.Error("expected the create-own-organization verdict to survive the round trip")
+	}
+}
+
+// contains is a local substring helper so these assertions read as prose.
+func contains(haystack, needle string) bool { return strings.Contains(haystack, needle) }
+
+// asAPIError adapts errors.As for the one type these tests unwrap to.
+func asAPIError(err error, target **kagi.APIError) bool { return errors.As(err, target) }

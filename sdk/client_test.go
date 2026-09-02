@@ -638,3 +638,192 @@ func TestErrorHandling_CancelledContext(t *testing.T) {
 		t.Fatal("expected error for canceled context, got nil")
 	}
 }
+
+// --- onboarding state ---------------------------------------------------------
+
+// The state read parses every field of the envelope's data object, including
+// the ones a blocked state carries (the join-target name a client renders in
+// its "waiting to be approved" screen) and the server's own verdict on whether
+// creating an organization is still on offer.
+func TestGetOnboardingState(t *testing.T) {
+	status := OnboardingStatus{
+		State:                       OnboardingStateJoinRequestPending,
+		UserStatus:                  "PENDING_ONBOARDING",
+		JoinRequestOrganizationName: "Sensey B.V.",
+		JoinRequestOrganizationSlug: "sensey",
+		CanCreateOwnOrganization:    false,
+	}
+	ts := newTestServer(t, "/kagi/onboarding/state", status)
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-token")
+	got, err := client.GetOnboardingState(context.Background())
+	if err != nil {
+		t.Fatalf("GetOnboardingState returned error: %v", err)
+	}
+	if got.State != OnboardingStateJoinRequestPending {
+		t.Errorf("unexpected state: got %q, want %q", got.State, OnboardingStateJoinRequestPending)
+	}
+	if got.UserStatus != "PENDING_ONBOARDING" {
+		t.Errorf("unexpected userStatus: got %q", got.UserStatus)
+	}
+	if got.JoinTargetLabel() != "Sensey B.V." {
+		t.Errorf("unexpected join target: got %q", got.JoinTargetLabel())
+	}
+	if got.CanCreateOwnOrganization {
+		t.Error("canCreateOwnOrganization must be false for a pending join request")
+	}
+}
+
+// The state read is the one call a caller with no organization has to be able
+// to make — it is how they learn why they have none. An org-aware (JWT) client
+// with nothing selected must therefore send it rather than fail fast, and it
+// must not carry an organization header it was never given.
+func TestGetOnboardingState_ReachableWithNoOrganizationSelected(t *testing.T) {
+	var sawOrgHeader string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/kagi/onboarding/state" {
+			t.Errorf("unexpected path: got %s", r.URL.Path)
+		}
+		sawOrgHeader = r.Header.Get(HeaderOrganizationID)
+		json.NewEncoder(w).Encode(map[string]any{
+			"data":    OnboardingStatus{State: OnboardingStateRequired, CanCreateOwnOrganization: true},
+			"message": "ok",
+			"status":  200,
+		})
+	}))
+	defer ts.Close()
+
+	client := NewOrgClient(ts.URL, "test-token", "", false)
+	got, err := client.GetOnboardingState(context.Background())
+	if err != nil {
+		t.Fatalf("GetOnboardingState with no org selected: %v", err)
+	}
+	if got.State != OnboardingStateRequired {
+		t.Errorf("unexpected state: got %q", got.State)
+	}
+	if sawOrgHeader != "" {
+		t.Errorf("no organization is selected, so no org header may be sent, got %q", sawOrgHeader)
+	}
+}
+
+// Every other org-scoped route keeps failing fast when nothing is selected —
+// exempting the state read must not widen into exempting the rest.
+func TestGetOnboardingState_ExemptionDoesNotLeakToOtherRoutes(t *testing.T) {
+	client := NewOrgClient("http://127.0.0.1:1", "test-token", "", false)
+	if _, err := client.ListEnvironments(context.Background(), "app-1"); !errors.Is(err, ErrNoOrganizationSelected) {
+		t.Fatalf("expected ErrNoOrganizationSelected for an org-scoped route, got %v", err)
+	}
+}
+
+// A state this build does not know (a newer backend, or a field the server
+// omitted) must read as "not set up yet". Reporting COMPLETE by accident would
+// claim an approval that may not exist.
+func TestOnboardingStatus_EffectiveStateFallsBackToRequired(t *testing.T) {
+	cases := []OnboardingState{"", "SOMETHING_NEW", "complete"}
+	for _, state := range cases {
+		status := OnboardingStatus{State: state}
+		if got := status.EffectiveState(); got != OnboardingStateRequired {
+			t.Errorf("EffectiveState(%q) = %q, want %q", state, got, OnboardingStateRequired)
+		}
+	}
+
+	known := []OnboardingState{
+		OnboardingStateRequired,
+		OnboardingStateJoinRequestPending,
+		OnboardingStateOrgNotAvailable,
+		OnboardingStateComplete,
+	}
+	for _, state := range known {
+		status := OnboardingStatus{State: state}
+		if got := status.EffectiveState(); got != state {
+			t.Errorf("EffectiveState(%q) = %q, want it unchanged", state, got)
+		}
+	}
+}
+
+// A blocked state whose display name was withheld falls back to the slug, and
+// then to "" so the caller substitutes its own wording instead of printing a
+// blank organization name.
+func TestOnboardingStatus_JoinTargetLabelFallsBack(t *testing.T) {
+	slugOnly := OnboardingStatus{JoinRequestOrganizationSlug: "sensey"}
+	if got := slugOnly.JoinTargetLabel(); got != "sensey" {
+		t.Errorf("JoinTargetLabel with slug only = %q, want %q", got, "sensey")
+	}
+	if got := (OnboardingStatus{}).JoinTargetLabel(); got != "" {
+		t.Errorf("JoinTargetLabel with nothing reported = %q, want empty", got)
+	}
+}
+
+// The not-onboarded refusal is classified by its wire code, not by its status:
+// 403 is shared with genuine permission failures, and telling a person they
+// lack permission when their account simply is not set up is the defect this
+// classifier exists to prevent.
+func TestIsNotOnboarded(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"success": false, "message": "Your account has not finished onboarding.", "data": null, "pagination": null, "error": {"code": "KGI_SEC_038", "message": "not onboarded"}}`))
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-token")
+	_, err := client.GetOnboardingState(context.Background())
+	if err == nil {
+		t.Fatal("expected an error for the 403 refusal")
+	}
+	if !IsNotOnboarded(err) {
+		t.Errorf("IsNotOnboarded = false for a KGI_SEC_038 refusal: %v", err)
+	}
+	if IsDomainClaimedByOtherOrg(err) {
+		t.Error("KGI_SEC_038 must not classify as the domain-claimed refusal")
+	}
+}
+
+// A different 403 must not be mistaken for the not-onboarded state.
+func TestIsNotOnboarded_IgnoresOtherCodes(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"success": false, "message": "organization mismatch", "error": {"code": "KGI_TEN_004"}}`))
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-token")
+	_, err := client.ListOrganizations(context.Background())
+	if err == nil {
+		t.Fatal("expected an error for the 403 refusal")
+	}
+	if IsNotOnboarded(err) {
+		t.Errorf("IsNotOnboarded = true for KGI_TEN_004: %v", err)
+	}
+}
+
+// The organization-creation refusal is classified the same way, so a client can
+// explain that the person's email domain belongs to an existing organization
+// rather than echoing a raw code.
+func TestIsDomainClaimedByOtherOrg(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"success": false, "message": "Your email domain is claimed by another organization.", "error": {"code": "KGI_STA_002"}}`))
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-token")
+	_, err := client.ListOrganizations(context.Background())
+	if !IsDomainClaimedByOtherOrg(err) {
+		t.Errorf("IsDomainClaimedByOtherOrg = false for a KGI_STA_002 refusal: %v", err)
+	}
+	if IsNotOnboarded(err) {
+		t.Error("KGI_STA_002 must not classify as the not-onboarded refusal")
+	}
+}
+
+// A nil error and a plain transport error carry no wire code and must classify
+// as neither.
+func TestHasErrorCode_NonAPIErrors(t *testing.T) {
+	if HasErrorCode(nil, ErrCodeAccountNotOnboarded) {
+		t.Error("a nil error must not carry a wire code")
+	}
+	if HasErrorCode(errors.New("connection refused"), ErrCodeAccountNotOnboarded) {
+		t.Error("a transport error must not carry a wire code")
+	}
+}

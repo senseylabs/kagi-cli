@@ -2,9 +2,49 @@ package kagi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
+
+// Backend wire error codes the CLI branches on. They are compared, never
+// printed: the human-facing wording lives with the command that renders it.
+const (
+	// ErrCodeAccountNotOnboarded (KGI_SEC_038) is the refusal every route
+	// except the onboarding escape hatches returns while an account has not
+	// finished onboarding. It is a state of the caller's own account, not a
+	// permission problem, and must never be presented as "access denied" or be
+	// answered with a re-login: the session is valid, the account is not ready.
+	ErrCodeAccountNotOnboarded = "KGI_SEC_038"
+	// ErrCodeDomainClaimedByOtherOrg (KGI_STA_002) refuses creating an own
+	// organization because the caller's verified email domain is already
+	// claimed by another organization. The way forward is joining that
+	// organization, never retrying the create.
+	ErrCodeDomainClaimedByOtherOrg = "KGI_STA_002"
+)
+
+// HasErrorCode reports whether err is (or wraps) an APIError carrying the given
+// backend wire code. Callers branch on this rather than on the HTTP status,
+// which is shared by unrelated refusals.
+func HasErrorCode(err error, code string) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Code == code
+}
+
+// IsNotOnboarded reports whether err is the backend's not-onboarded refusal
+// (KGI_SEC_038). It is a definitive answer about the caller's own account, so a
+// command may act on it — clear the session, explain the situation — rather
+// than treating it as a transient failure.
+func IsNotOnboarded(err error) bool {
+	return HasErrorCode(err, ErrCodeAccountNotOnboarded)
+}
+
+// IsDomainClaimedByOtherOrg reports whether err is the backend's refusal to
+// create an organization for a caller whose email domain another organization
+// already claims (KGI_STA_002).
+func IsDomainClaimedByOtherOrg(err error) bool {
+	return HasErrorCode(err, ErrCodeDomainClaimedByOtherOrg)
+}
 
 // APIError is a typed error describing a non-2xx response from the Kagi API.
 // It carries the HTTP status, the backend wire error code (e.g. "KGI_TEN_004")
